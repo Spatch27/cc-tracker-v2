@@ -162,6 +162,22 @@ describe("Gold-list import tab allowlist & parser (synthetic fixtures)", () => {
       companies,
     );
     expect(missing.status).toBe("unmatched");
+
+    const dupes: FolkCompany[] = [
+      makeCompany({ id: "cmp_stub", name: "Acme", urls: [] }),
+      makeCompany({
+        id: "cmp_rich",
+        name: "Acme Ltd",
+        urls: ["https://acme.test"],
+      }),
+    ];
+    const resolvedByContact = matchGoldCompanyToFolk(
+      { companyName: "Acme", brandName: null },
+      dupes,
+      { id: "cmp_rich", name: "Acme Ltd" },
+    );
+    expect(resolvedByContact.status).toBe("matched");
+    expect(resolvedByContact.bestMatch?.folkCompanyId).toBe("cmp_rich");
   });
 
   it("infers contact role category and buying signal type cleanly", () => {

@@ -92,8 +92,8 @@ export async function POST(request: Request) {
       getActiveGoldCountsByOwner(db),
       db.select().from(schema.goldAccounts),
       db.select().from(schema.folkCompaniesLink),
-      listAllFolkCompanies(folkClient, 30),
-      listAllFolkPeople(folkClient, 30),
+      listAllFolkCompanies(folkClient, 50),
+      listAllFolkPeople(folkClient, 50),
     ]);
 
     const founderMap = new Map(founders.map((f) => [f.id, f]));
@@ -140,7 +140,11 @@ export async function POST(request: Request) {
             peoplePageResult.items,
           );
           if (pMatch.status === "unmatched") {
-            unmatchedPeople.add(row.contactName.trim());
+            const cleanedContact = row.contactName
+              .replace(/\([^)]*\)/g, " ")
+              .replace(/\s+/g, " ")
+              .trim();
+            if (cleanedContact) unmatchedPeople.add(cleanedContact);
           }
         }
         const cMatch = matchGoldCompanyToFolk(
@@ -148,13 +152,24 @@ export async function POST(request: Request) {
           companiesPageResult.items,
         );
         if (cMatch.status === "unmatched") {
-          unmatchedCompanies.add(row.companyName.trim());
+          const cleanedCompany = row.companyName
+            .replace(/\([^)]*\)/g, " ")
+            .replace(/\s+/g, " ")
+            .trim();
+          if (cleanedCompany) unmatchedCompanies.add(cleanedCompany);
+          if (row.brandName) {
+            const cleanedBrand = row.brandName
+              .replace(/\([^)]*\)/g, " ")
+              .replace(/\s+/g, " ")
+              .trim();
+            if (cleanedBrand) unmatchedCompanies.add(cleanedBrand);
+          }
         }
       }
     }
 
-    const BATCH = 5;
-    const targetPeople = Array.from(unmatchedPeople).slice(0, 45);
+    const BATCH = 8;
+    const targetPeople = Array.from(unmatchedPeople).slice(0, 100);
     for (let i = 0; i < targetPeople.length; i += BATCH) {
       const batch = targetPeople.slice(i, i + BATCH);
       const resList = await Promise.all(
@@ -171,7 +186,7 @@ export async function POST(request: Request) {
       }
     }
 
-    const targetCompanies = Array.from(unmatchedCompanies).slice(0, 45);
+    const targetCompanies = Array.from(unmatchedCompanies).slice(0, 120);
     for (let i = 0; i < targetCompanies.length; i += BATCH) {
       const batch = targetCompanies.slice(i, i + BATCH);
       const resList = await Promise.all(

@@ -377,10 +377,34 @@ export function matchGoldCompanyToFolk(
     };
   }
   if (exactCandidates.length > 1) {
+    if (linkedContactCompanyRef?.id) {
+      const contactMatched = exactCandidates.find(
+        (c) => c.folkCompanyId === linkedContactCompanyRef.id,
+      );
+      if (contactMatched) {
+        const winner: FolkCompanyCandidate = {
+          ...contactMatched,
+          scoreReason: "Exact company match + contact's Folk company",
+        };
+        return {
+          status: "matched",
+          bestMatch: winner,
+          candidates: exactCandidates.slice(0, 5),
+          matchReason: winner.scoreReason,
+        };
+      }
+    }
+
+    const sortedExact = [...exactCandidates].sort((a, b) => {
+      const aHasDomain = a.domain ? 1 : 0;
+      const bHasDomain = b.domain ? 1 : 0;
+      return bHasDomain - aHasDomain;
+    });
+
     return {
       status: "ambiguous",
-      bestMatch: exactCandidates[0],
-      candidates: exactCandidates.slice(0, 5),
+      bestMatch: sortedExact[0],
+      candidates: sortedExact.slice(0, 5),
       matchReason: `Found ${exactCandidates.length} Folk companies matching name`,
     };
   }

@@ -10,14 +10,17 @@ import {
   ClipboardCheck,
   Crown,
   FileSpreadsheet,
+  Search,
   ShieldBan,
   Upload,
+  X,
 } from "lucide-react";
 import type { RowMatchResult } from "@/lib/breakfasts/import-parser";
 import type { FounderOption } from "@/lib/founders";
 import {
   isApprovedGoldTabName,
   parseGoldListTab,
+  type FolkCompanyCandidate,
   type GoldCompanyMatchResult,
   type ParsedGoldAccountRow,
 } from "@/lib/gold-lists/import-parser";
@@ -92,6 +95,20 @@ export function GoldImportClient({
   const [applying, setApplying] = useState(false);
   const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  // Per-tab filter & inline Folk company search
+  const [onlyAttentionByTab, setOnlyAttentionByTab] = useState<
+    Record<string, boolean>
+  >({});
+  const [customCompanyByRow, setCustomCompanyByRow] = useState<
+    Record<string, FolkCompanyCandidate>
+  >({});
+  const [companySearchKey, setCompanySearchKey] = useState<string | null>(null);
+  const [companySearchQuery, setCompanySearchQuery] = useState("");
+  const [companySearchLoading, setCompanySearchLoading] = useState(false);
+  const [companySearchResults, setCompanySearchResults] = useState<
+    FolkCompanyCandidate[]
+  >([]);
 
   async function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
     const file = e.target.files?.[0];
@@ -208,6 +225,66 @@ export function GoldImportClient({
     }));
   }
 
+  async function runCompanySearch(queryText: string) {
+    setCompanySearchLoading(true);
+    try {
+      const res = await fetch(
+        `/api/folk/companies?q=${encodeURIComponent(queryText.trim())}`,
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error ?? "Failed to search Folk companies");
+        return;
+      }
+      setCompanySearchResults(
+        (data.companies ?? []).map(
+          (c: {
+            folkCompanyId: string;
+            name: string;
+            domain: string | null;
+            industries: string[];
+          }) => ({
+            ...c,
+            scoreReason: "Selected via Folk search",
+          }),
+        ),
+      );
+    } catch {
+      setError("Network error searching Folk companies");
+    } finally {
+      setCompanySearchLoading(false);
+    }
+  }
+
+  async function openCompanySearch(key: string, row: PreviewGoldRow) {
+    if (companySearchKey === key) {
+      setCompanySearchKey(null);
+      return;
+    }
+    const defaultQ = (row.brandName || row.companyName)
+      .replace(/\([^)]*\)/g, " ")
+      .replace(/\s+/g, " ")
+      .trim();
+    setCompanySearchKey(key);
+    setCompanySearchQuery(defaultQ);
+    setCompanySearchResults([]);
+    await runCompanySearch(defaultQ);
+  }
+
+  function pickCustomCompany(
+    key: string,
+    row: PreviewGoldRow,
+    company: FolkCompanyCandidate,
+  ) {
+    setCustomCompanyByRow((prev) => ({ ...prev, [key]: company }));
+    updateDecision(key, {
+      selectedFolkCompanyId: company.folkCompanyId,
+      includeImport: !row.alreadyOnGoldList,
+      flagMissingToReview: false,
+    });
+    setCompanySearchKey(null);
+  }
+
   // Compute live projected owner counts & summary stats
   const projectedByOwner: Record<string, number> = preview
     ? { ...preview.existingOwnerCounts }
@@ -311,15 +388,20 @@ export function GoldImportClient({
         if (!ownerUserId) continue;
 
         for (const row of tab.rows) {
-          const d = decisions[rowKey(tab.tabName, row.rowNumber)];
+          const key = rowKey(tab.tabName, row.rowNumber);
+          const d = decisions[key];
           if (!d) continue;
 
+          const customCompany = customCompanyByRow[key];
           const pickedCompany =
-            row.companyMatch.bestMatch?.folkCompanyId === d.selectedFolkCompanyId
-              ? row.companyMatch.bestMatch
-              : row.companyMatch.candidates.find(
-                  (c) => c.folkCompanyId === d.selectedFolkCompanyId,
-                ) ?? null;
+            customCompany?.folkCompanyId === d.selectedFolkCompanyId
+              ? customCompany
+              : row.companyMatch.bestMatch?.folkCompanyId ===
+                  d.selectedFolkCompanyId
+                ? row.companyMatch.bestMatch
+                : row.companyMatch.candidates.find(
+                    (c) => c.folkCompanyId === d.selectedFolkCompanyId,
+                  ) ?? null;
 
           if (d.includeImport && pickedCompany && !row.alreadyOnGoldList) {
             const pickedPerson =
@@ -600,235 +682,402 @@ export function GoldImportClient({
             </div>
           )}
 
-          {preview.tabs.map((tab) => (
-            <div
-              key={tab.tabName}
-              className="rounded-xl border border-border bg-surface p-5 space-y-4"
-            >
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-                <div>
-                  <h2 className="text-base font-semibold text-foreground">
-                    {tab.tabName} ({tab.rows.length} accounts)
-                  </h2>
-                  <p className="text-xs text-muted">
-                    Legacy ranks, scores, and personas are preserved read-only on
-                    each imported account.
-                  </p>
+          {preview.tabs.map((tab) => {
+            const onlyAttention = Boolean(onlyAttentionByTab[tab.tabName]);
+            let tabToImport = 0;
+            let tabPickCompany = 0;
+            let tabNotInFolk = 0;
+            let tabAlreadyGold = 0;
+
+            for (const r of tab.rows) {
+              const d = decisions[rowKey(tab.tabName, r.rowNumber)];
+              if (r.alreadyOnGoldList) {
+                tabAlreadyGold += 1;
+              } else if (d?.includeImport && d.selectedFolkCompanyId) {
+                tabToImport += 1;
+              } else if (r.companyMatch.candidates.length > 0) {
+                tabPickCompany += 1;
+              } else {
+                tabNotInFolk += 1;
+              }
+            }
+
+            const visibleRows = onlyAttention
+              ? tab.rows.filter((r) => {
+                  const d = decisions[rowKey(tab.tabName, r.rowNumber)];
+                  return !r.alreadyOnGoldList && !(d?.includeImport && d.selectedFolkCompanyId);
+                })
+              : tab.rows;
+
+            return (
+              <div
+                key={tab.tabName}
+                className="rounded-xl border border-border bg-surface p-5 space-y-4"
+              >
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div className="space-y-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <h2 className="text-base font-semibold text-foreground">
+                        {tab.tabName} ({tab.rows.length} accounts)
+                      </h2>
+                      <span className="rounded-full border border-success/40 bg-success/10 px-2 py-0.5 text-[11px] text-success">
+                        {tabToImport} to import
+                      </span>
+                      {tabPickCompany > 0 && (
+                        <span className="rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-[11px] text-warning">
+                          {tabPickCompany} pick company
+                        </span>
+                      )}
+                      {tabNotInFolk > 0 && (
+                        <span className="rounded-full border border-accent/40 bg-accent/10 px-2 py-0.5 text-[11px] text-accent">
+                          {tabNotInFolk} not in Folk
+                        </span>
+                      )}
+                      {tabAlreadyGold > 0 && (
+                        <span className="rounded-full border border-border bg-surface-elevated px-2 py-0.5 text-[11px] text-muted">
+                          {tabAlreadyGold} already on Gold
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-muted">
+                      Legacy ranks, scores, and personas are preserved read-only
+                      on each imported account.
+                    </p>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-2 text-xs">
+                    {(tabPickCompany > 0 || tabNotInFolk > 0) && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setOnlyAttentionByTab((prev) => ({
+                            ...prev,
+                            [tab.tabName]: !onlyAttention,
+                          }))
+                        }
+                        className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium transition-colors ${
+                          onlyAttention
+                            ? "border-accent bg-accent/15 text-accent"
+                            : "border-border bg-surface-elevated text-muted hover:text-foreground"
+                        }`}
+                      >
+                        {onlyAttention
+                          ? `Showing unresolved (${visibleRows.length})`
+                          : `Show unresolved (${tabPickCompany + tabNotInFolk})`}
+                      </button>
+                    )}
+                    <span className="text-muted">Owner:</span>
+                    <select
+                      value={ownerByTab[tab.tabName] ?? ""}
+                      onChange={(e) =>
+                        setOwnerByTab((prev) => ({
+                          ...prev,
+                          [tab.tabName]: e.target.value,
+                        }))
+                      }
+                      className="rounded-lg border border-border bg-surface-elevated px-3 py-1.5 text-xs text-foreground"
+                    >
+                      {preview.founders.map((f) => (
+                        <option key={f.id} value={f.id}>
+                          {f.name}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
                 </div>
 
-                <div className="flex items-center gap-2 text-xs">
-                  <span className="text-muted">Assign Owner:</span>
-                  <select
-                    value={ownerByTab[tab.tabName] ?? ""}
-                    onChange={(e) =>
-                      setOwnerByTab((prev) => ({
-                        ...prev,
-                        [tab.tabName]: e.target.value,
-                      }))
-                    }
-                    className="rounded-lg border border-border bg-surface-elevated px-3 py-1.5 text-xs text-foreground"
-                  >
-                    {preview.founders.map((f) => (
-                      <option key={f.id} value={f.id}>
-                        {f.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              </div>
+                <div className="overflow-x-auto rounded-lg border border-border">
+                  <table className="w-full text-left text-xs">
+                    <thead className="bg-surface-elevated text-muted border-b border-border">
+                      <tr>
+                        <th className="px-3 py-2 font-medium">Action</th>
+                        <th className="px-3 py-2 font-medium">Sheet Company</th>
+                        <th className="px-3 py-2 font-medium">Folk Company Match</th>
+                        <th className="px-3 py-2 font-medium">Decision-Maker</th>
+                        <th className="px-3 py-2 font-medium">Warnings &amp; Signals</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-border">
+                      {visibleRows.map((row) => {
+                        const k = rowKey(tab.tabName, row.rowNumber);
+                        const d = decisions[k];
+                        const customComp = customCompanyByRow[k];
+                        const companyOptions = customComp
+                          ? [
+                              customComp,
+                              ...row.companyMatch.candidates.filter(
+                                (c) => c.folkCompanyId !== customComp.folkCompanyId,
+                              ),
+                            ]
+                          : row.companyMatch.candidates;
+                        const selectedCompanyId = d?.selectedFolkCompanyId ?? "";
 
-              <div className="overflow-x-auto rounded-lg border border-border">
-                <table className="w-full text-left text-xs">
-                  <thead className="bg-surface-elevated text-muted border-b border-border">
-                    <tr>
-                      <th className="px-3 py-2 font-medium">Action</th>
-                      <th className="px-3 py-2 font-medium">Sheet Company</th>
-                      <th className="px-3 py-2 font-medium">Folk Company Match</th>
-                      <th className="px-3 py-2 font-medium">Decision-Maker</th>
-                      <th className="px-3 py-2 font-medium">Warnings &amp; Signals</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-border">
-                    {tab.rows.map((row) => {
-                      const k = rowKey(tab.tabName, row.rowNumber);
-                      const d = decisions[k];
-                      const companyOptions = row.companyMatch.candidates;
-                      const selectedCompanyId = d?.selectedFolkCompanyId ?? "";
-
-                      return (
-                        <tr key={k}>
-                          <td className="px-3 py-2.5 whitespace-nowrap align-top">
-                            {row.alreadyOnGoldList ? (
-                              <span className="text-muted font-mono">
-                                Already on Gold ({row.existingGoldOwnerName})
-                              </span>
-                            ) : selectedCompanyId ? (
-                              <label className="inline-flex items-center gap-1.5 cursor-pointer">
-                                <input
-                                  type="checkbox"
-                                  checked={Boolean(d?.includeImport)}
-                                  onChange={(e) =>
-                                    updateDecision(k, {
-                                      includeImport: e.target.checked,
-                                    })
-                                  }
-                                />
-                                <span className="text-foreground">Import</span>
-                              </label>
-                            ) : (
-                              <label className="inline-flex items-center gap-1.5 cursor-pointer">
-                                <input
-                                  type="checkbox"
-                                  checked={Boolean(d?.flagMissingToReview)}
-                                  onChange={(e) =>
-                                    updateDecision(k, {
-                                      flagMissingToReview: e.target.checked,
-                                    })
-                                  }
-                                />
-                                <span className="text-accent">
-                                  Flag to Review Queue
+                        return (
+                          <tr key={k}>
+                            <td className="px-3 py-2.5 whitespace-nowrap align-top">
+                              {row.alreadyOnGoldList ? (
+                                <span className="text-muted font-mono">
+                                  Already on Gold ({row.existingGoldOwnerName})
                                 </span>
-                              </label>
-                            )}
-                          </td>
+                              ) : selectedCompanyId ? (
+                                <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={Boolean(d?.includeImport)}
+                                    onChange={(e) =>
+                                      updateDecision(k, {
+                                        includeImport: e.target.checked,
+                                      })
+                                    }
+                                  />
+                                  <span className="text-foreground">Import</span>
+                                </label>
+                              ) : (
+                                <label className="inline-flex items-center gap-1.5 cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={Boolean(d?.flagMissingToReview)}
+                                    onChange={(e) =>
+                                      updateDecision(k, {
+                                        flagMissingToReview: e.target.checked,
+                                      })
+                                    }
+                                  />
+                                  <span className="text-accent">
+                                    Flag to Review Queue
+                                  </span>
+                                </label>
+                              )}
+                            </td>
 
-                          <td className="px-3 py-2.5 align-top">
-                            <p className="font-medium text-foreground">
-                              {row.companyName}
-                            </p>
-                            {row.duplicateInBatch && (
-                              <span className="rounded bg-warning/15 text-warning px-1.5 py-0.5 text-[10px]">
-                                Duplicate across tabs
-                              </span>
-                            )}
-                            {Boolean(row.legacyScoreMetadata.rank) && (
-                              <p className="text-[11px] text-muted">
-                                Rank #{String(row.legacyScoreMetadata.rank)}
-                                {row.legacyScoreMetadata.totalScore
-                                  ? ` · Score ${String(row.legacyScoreMetadata.totalScore)}`
-                                  : ""}
+                            <td className="px-3 py-2.5 align-top">
+                              <p className="font-medium text-foreground">
+                                {row.companyName}
                               </p>
-                            )}
-                          </td>
-
-                          <td className="px-3 py-2.5 align-top">
-                            {companyOptions.length > 0 ? (
-                              <div className="space-y-1">
-                                <select
-                                  value={selectedCompanyId}
-                                  onChange={(e) => {
-                                    const nextCompId = e.target.value;
-                                    updateDecision(k, {
-                                      selectedFolkCompanyId: nextCompId,
-                                      includeImport:
-                                        Boolean(nextCompId) &&
-                                        !row.alreadyOnGoldList,
-                                      flagMissingToReview: !nextCompId,
-                                    });
-                                  }}
-                                  className="w-full max-w-xs rounded-lg border border-border bg-surface-elevated px-2 py-1 text-xs text-foreground"
-                                >
-                                  <option value="">
-                                    — None (flag to Review Queue) —
-                                  </option>
-                                  {companyOptions.map((c) => (
-                                    <option
-                                      key={c.folkCompanyId}
-                                      value={c.folkCompanyId}
-                                    >
-                                      {c.name}
-                                      {c.domain ? ` (${c.domain})` : ""}
-                                    </option>
-                                  ))}
-                                </select>
+                              {row.duplicateInBatch && (
+                                <span className="rounded bg-warning/15 text-warning px-1.5 py-0.5 text-[10px]">
+                                  Duplicate across tabs
+                                </span>
+                              )}
+                              {Boolean(row.legacyScoreMetadata.rank) && (
                                 <p className="text-[11px] text-muted">
-                                  {row.companyMatch.matchReason}
+                                  Rank #{String(row.legacyScoreMetadata.rank)}
+                                  {row.legacyScoreMetadata.totalScore
+                                    ? ` · Score ${String(row.legacyScoreMetadata.totalScore)}`
+                                    : ""}
                                 </p>
-                              </div>
-                            ) : (
-                              <span className="text-[11px] text-accent">
-                                {row.companyMatch.matchReason}
-                              </span>
-                            )}
-                          </td>
+                              )}
+                            </td>
 
-                          <td className="px-3 py-2.5 align-top">
-                            {row.isContactGap ? (
-                              <span className="rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-[11px] text-warning">
-                                Coverage Gap (TBC)
-                              </span>
-                            ) : row.contactMatch?.candidates.length ? (
-                              <div className="space-y-1">
-                                <select
-                                  value={d?.selectedFolkPersonId ?? ""}
-                                  onChange={(e) =>
-                                    updateDecision(k, {
-                                      selectedFolkPersonId: e.target.value,
-                                    })
-                                  }
-                                  className="w-full max-w-[210px] rounded-lg border border-border bg-surface-elevated px-2 py-1 text-xs text-foreground"
-                                >
-                                  <option value="">— Gap / unlinked —</option>
-                                  {row.contactMatch.candidates.map((p) => (
-                                    <option
-                                      key={p.folkPersonId}
-                                      value={p.folkPersonId}
+                            <td className="px-3 py-2.5 align-top">
+                              <div className="space-y-1.5">
+                                {companyOptions.length > 0 ? (
+                                  <div className="space-y-1">
+                                    <select
+                                      value={selectedCompanyId}
+                                      onChange={(e) => {
+                                        const nextCompId = e.target.value;
+                                        updateDecision(k, {
+                                          selectedFolkCompanyId: nextCompId,
+                                          includeImport:
+                                            Boolean(nextCompId) &&
+                                            !row.alreadyOnGoldList,
+                                          flagMissingToReview: !nextCompId,
+                                        });
+                                      }}
+                                      className="w-full max-w-xs rounded-lg border border-border bg-surface-elevated px-2 py-1 text-xs text-foreground"
                                     >
-                                      {p.fullName}
-                                      {p.email ? ` (${p.email})` : ""}
-                                    </option>
-                                  ))}
-                                </select>
-                                <p className="text-[11px] text-muted">
-                                  {row.contactTitle ?? row.inferredRoleCategory}
-                                </p>
-                              </div>
-                            ) : (
-                              <div>
-                                <p className="text-foreground">
-                                  {row.contactName}
-                                </p>
-                                <p className="text-[11px] text-warning">
-                                  Not linked in Folk (logs gap)
-                                </p>
-                              </div>
-                            )}
-                          </td>
+                                      <option value="">
+                                        — None (flag to Review Queue) —
+                                      </option>
+                                      {companyOptions.map((c) => (
+                                        <option
+                                          key={c.folkCompanyId}
+                                          value={c.folkCompanyId}
+                                        >
+                                          {c.name}
+                                          {c.domain ? ` (${c.domain})` : ""}
+                                        </option>
+                                      ))}
+                                    </select>
+                                    <p className="text-[11px] text-muted">
+                                      {customComp?.folkCompanyId === selectedCompanyId
+                                        ? customComp.scoreReason
+                                        : row.companyMatch.matchReason}
+                                    </p>
+                                  </div>
+                                ) : (
+                                  <span className="text-[11px] text-accent block">
+                                    {row.companyMatch.matchReason}
+                                  </span>
+                                )}
 
-                          <td className="px-3 py-2.5 align-top max-w-[250px] space-y-1">
-                            {row.staleDataWarning && (
-                              <label className="flex items-start gap-1.5 text-[11px] text-warning cursor-pointer">
-                                <input
-                                  type="checkbox"
-                                  checked={Boolean(d?.flagWarningToReview)}
-                                  onChange={(e) =>
-                                    updateDecision(k, {
-                                      flagWarningToReview: e.target.checked,
-                                    })
-                                  }
-                                  className="mt-0.5"
-                                />
-                                <span>{row.staleDataWarning}</span>
-                              </label>
-                            )}
-                            {row.changeSignals && (
-                              <p className="text-[11px] text-muted">
-                                Signal: {row.changeSignals}
-                              </p>
-                            )}
-                            {!row.staleDataWarning && !row.changeSignals && (
-                              <span className="text-muted">—</span>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
+                                {!row.alreadyOnGoldList && (
+                                  <button
+                                    type="button"
+                                    onClick={() => openCompanySearch(k, row)}
+                                    className="inline-flex items-center gap-1 text-[11px] text-accent hover:underline"
+                                  >
+                                    <Search className="h-3 w-3" />
+                                    {companySearchKey === k
+                                      ? "Close search"
+                                      : "Search Folk company"}
+                                  </button>
+                                )}
+
+                                {companySearchKey === k && (
+                                  <div className="mt-1 rounded-lg border border-accent/40 bg-surface-elevated p-2.5 space-y-2 max-w-xs">
+                                    <div className="flex gap-1.5">
+                                      <input
+                                        type="text"
+                                        value={companySearchQuery}
+                                        onChange={(e) =>
+                                          setCompanySearchQuery(e.target.value)
+                                        }
+                                        onKeyDown={(e) => {
+                                          if (e.key === "Enter") {
+                                            e.preventDefault();
+                                            void runCompanySearch(
+                                              companySearchQuery,
+                                            );
+                                          }
+                                        }}
+                                        placeholder="Company name..."
+                                        className="flex-1 rounded border border-border bg-surface px-2 py-1 text-[11px] text-foreground"
+                                      />
+                                      <button
+                                        type="button"
+                                        disabled={companySearchLoading}
+                                        onClick={() =>
+                                          runCompanySearch(companySearchQuery)
+                                        }
+                                        className="rounded bg-accent px-2 py-1 text-[11px] font-semibold text-accent-foreground"
+                                      >
+                                        {companySearchLoading ? "..." : "Go"}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => setCompanySearchKey(null)}
+                                        className="text-muted hover:text-foreground px-1"
+                                      >
+                                        <X className="h-3 w-3" />
+                                      </button>
+                                    </div>
+                                    {companySearchLoading ? (
+                                      <p className="text-[11px] text-muted">
+                                        Searching Folk...
+                                      </p>
+                                    ) : companySearchResults.length === 0 ? (
+                                      <p className="text-[11px] text-muted">
+                                        No Folk company matched &ldquo;
+                                        {companySearchQuery}&rdquo;.
+                                      </p>
+                                    ) : (
+                                      <div className="max-h-36 overflow-y-auto divide-y divide-border rounded border border-border bg-surface">
+                                        {companySearchResults.map((c) => (
+                                          <div
+                                            key={c.folkCompanyId}
+                                            className="flex items-center justify-between gap-2 px-2 py-1.5 text-[11px]"
+                                          >
+                                            <span className="truncate text-foreground">
+                                              {c.name}
+                                              {c.domain ? ` (${c.domain})` : ""}
+                                            </span>
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                pickCustomCompany(k, row, c)
+                                              }
+                                              className="shrink-0 rounded border border-accent/40 bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium text-accent"
+                                            >
+                                              Use
+                                            </button>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+
+                            <td className="px-3 py-2.5 align-top">
+                              {row.isContactGap ? (
+                                <span className="rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 text-[11px] text-warning">
+                                  Coverage Gap (TBC)
+                                </span>
+                              ) : row.contactMatch?.candidates.length ? (
+                                <div className="space-y-1">
+                                  <select
+                                    value={d?.selectedFolkPersonId ?? ""}
+                                    onChange={(e) =>
+                                      updateDecision(k, {
+                                        selectedFolkPersonId: e.target.value,
+                                      })
+                                    }
+                                    className="w-full max-w-[210px] rounded-lg border border-border bg-surface-elevated px-2 py-1 text-xs text-foreground"
+                                  >
+                                    <option value="">— Gap / unlinked —</option>
+                                    {row.contactMatch.candidates.map((p) => (
+                                      <option
+                                        key={p.folkPersonId}
+                                        value={p.folkPersonId}
+                                      >
+                                        {p.fullName}
+                                        {p.email ? ` (${p.email})` : ""}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <p className="text-[11px] text-muted">
+                                    {row.contactTitle ?? row.inferredRoleCategory}
+                                  </p>
+                                </div>
+                              ) : (
+                                <div>
+                                  <p className="text-foreground">
+                                    {row.contactName}
+                                  </p>
+                                  <p className="text-[11px] text-warning">
+                                    Not linked in Folk (logs gap)
+                                  </p>
+                                </div>
+                              )}
+                            </td>
+
+                            <td className="px-3 py-2.5 align-top max-w-[250px] space-y-1">
+                              {row.staleDataWarning && (
+                                <label className="flex items-start gap-1.5 text-[11px] text-warning cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={Boolean(d?.flagWarningToReview)}
+                                    onChange={(e) =>
+                                      updateDecision(k, {
+                                        flagWarningToReview: e.target.checked,
+                                      })
+                                    }
+                                    className="mt-0.5"
+                                  />
+                                  <span>{row.staleDataWarning}</span>
+                                </label>
+                              )}
+                              {row.changeSignals && (
+                                <p className="text-[11px] text-muted">
+                                  Signal: {row.changeSignals}
+                                </p>
+                              )}
+                              {!row.staleDataWarning && !row.changeSignals && (
+                                <span className="text-muted">—</span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               </div>
-            </div>
-          ))}
+            );
+          })}
 
           <div className="rounded-xl border border-border bg-surface p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
             <div className="text-xs text-muted">
