@@ -1,3 +1,4 @@
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { getDb, isDatabaseConfigured, schema } from "@/db";
 import { errorResponse } from "@/lib/api-auth";
@@ -59,6 +60,63 @@ export async function POST(
     });
 
     return Response.json({ intelligence: created }, { status: 201 });
+  } catch (err) {
+    return errorResponse(err);
+  }
+}
+
+export async function DELETE(
+  request: Request,
+  context: { params: Promise<{ id: string }> },
+) {
+  try {
+    const founder = await requireFounderSession();
+    if (!isDatabaseConfigured()) {
+      return Response.json(
+        { error: "Database is not configured" },
+        { status: 503 },
+      );
+    }
+
+    const { id: goldAccountId } = await context.params;
+    const { searchParams } = new URL(request.url);
+    const intelligenceId = searchParams.get("intelligenceId");
+    if (!intelligenceId) {
+      return Response.json(
+        { error: "intelligenceId is required" },
+        { status: 400 },
+      );
+    }
+
+    const db = getDb();
+    const [deleted] = await db
+      .delete(schema.accountIntelligence)
+      .where(
+        and(
+          eq(schema.accountIntelligence.id, intelligenceId),
+          eq(schema.accountIntelligence.goldAccountId, goldAccountId),
+        ),
+      )
+      .returning();
+
+    if (!deleted) {
+      return Response.json(
+        { error: "Intelligence entry not found" },
+        { status: 404 },
+      );
+    }
+
+    await recordAuditEvent({
+      actorType: "human",
+      actorUserId: founder.userId,
+      action: "gold_intelligence_deleted",
+      entityType: "account_intelligence",
+      entityId: intelligenceId,
+      previousValue: { dimension: deleted.dimension, summary: deleted.summary },
+      outcome: "succeeded",
+    });
+
+    return Response.json({ ok: true });
   } catch (err) {
     return errorResponse(err);
   }

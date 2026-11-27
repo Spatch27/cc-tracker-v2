@@ -61,6 +61,11 @@ export interface SerializedInvitee {
     note: string | null;
     createdAt: string;
   }>;
+  postEventFollowUp?: {
+    status: "not_started" | "drafted" | "approved" | "sent" | "replied";
+    referralCount: number;
+    latestMessageId: string | null;
+  };
 }
 
 export interface SerializedBreakfastWorkspace {
@@ -497,6 +502,89 @@ export function BreakfastWorkspaceClient({
       await refreshWorkspace();
     } catch {
       setBanner({ kind: "error", text: "Network error removing invitee" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function queueAllPostEventDrafts() {
+    setBusy(true);
+    setBanner(null);
+    try {
+      const res = await fetch(
+        `/api/breakfasts/${ws.event.id}/post-event-followup`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mode: "queue_all_attendee_drafts",
+            senderUserId: currentFounderUserId ?? ws.founders[0]?.id,
+          }),
+        },
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setBanner({
+          kind: "error",
+          text: data.error ?? "Failed to queue post-event drafts",
+        });
+        return;
+      }
+      setBanner({
+        kind: data.createdCount > 0 ? "info" : "warning",
+        text: `Queued ${data.createdCount} thank-you & referral draft(s) in Message Approvals (${data.skippedCount} skipped).`,
+      });
+      await refreshWorkspace();
+    } catch {
+      setBanner({
+        kind: "error",
+        text: "Network error queueing post-event drafts",
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function markPostEventFollowUpStatus(
+    folkPersonLinkId: string,
+    status: "sent" | "replied",
+  ) {
+    setBusy(true);
+    setBanner(null);
+    try {
+      const res = await fetch(
+        `/api/breakfasts/${ws.event.id}/post-event-followup`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            mode: "mark_status",
+            folkPersonLinkId,
+            status,
+          }),
+        },
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setBanner({
+          kind: "error",
+          text: data.error ?? "Failed to record post-event follow-up status",
+        });
+        return;
+      }
+      setBanner({
+        kind: "info",
+        text:
+          status === "replied"
+            ? "Marked attendee post-event reply received."
+            : "Marked attendee post-event thank-you email sent.",
+      });
+      await refreshWorkspace();
+    } catch {
+      setBanner({
+        kind: "error",
+        text: "Network error recording post-event follow-up status",
+      });
     } finally {
       setBusy(false);
     }
@@ -1873,6 +1961,165 @@ export function BreakfastWorkspaceClient({
               </button>
             </div>
           </div>
+
+          {/* Post-Event Attendee Follow-Up Tracker */}
+          {(() => {
+            const attendees = ws.invitations.filter(
+              (i) => i.attendanceOutcome === "attended",
+            );
+            const followedUpCount = attendees.filter((a) =>
+              ["sent", "replied"].includes(
+                a.postEventFollowUp?.status ?? "not_started",
+              ),
+            ).length;
+            const repliedCount = attendees.filter(
+              (a) => a.postEventFollowUp?.status === "replied",
+            ).length;
+            const FOLLOW_LABELS: Record<
+              "not_started" | "drafted" | "approved" | "sent" | "replied",
+              { label: string; style: string }
+            > = {
+              not_started: {
+                label: "Not started",
+                style: "border-border bg-surface-elevated text-muted",
+              },
+              drafted: {
+                label: "Draft in Approvals",
+                style: "border-warning/30 bg-warning/10 text-warning",
+              },
+              approved: {
+                label: "Approved (ready)",
+                style: "border-accent/40 bg-accent/15 text-accent",
+              },
+              sent: {
+                label: "Sent",
+                style: "border-success/30 bg-success/10 text-success",
+              },
+              replied: {
+                label: "Replied / Referred",
+                style: "border-success/40 bg-success/20 text-success font-medium",
+              },
+            };
+
+            return (
+              <div className="rounded-xl border border-border bg-surface p-5 space-y-4">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-semibold">
+                      Post-Event Attendee Follow-Up &amp; Recommendation Ask
+                    </h2>
+                    <p className="text-[11px] text-muted mt-0.5">
+                      {attendees.length === 0
+                        ? "Mark attendees as Attended on the Invitees tab after the breakfast to track post-event thank-you & referral emails."
+                        : `${followedUpCount} of ${attendees.length} attendees followed up · ${repliedCount} replied · ${ws.referrals.length} referral(s) captured`}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <Link
+                      href="/approvals"
+                      className="rounded-lg border border-border bg-surface-elevated px-3 py-1.5 text-xs hover:border-accent/50"
+                    >
+                      Open Message Approvals →
+                    </Link>
+                    <button
+                      type="button"
+                      disabled={busy || attendees.length === 0}
+                      onClick={queueAllPostEventDrafts}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-1.5 text-xs font-semibold text-accent-foreground disabled:opacity-40"
+                    >
+                      <MailPlus className="h-3.5 w-3.5" />
+                      Queue Thank-You &amp; Referral Drafts
+                    </button>
+                  </div>
+                </div>
+
+                {attendees.length > 0 && (
+                  <div className="overflow-x-auto rounded-lg border border-border">
+                    <table className="w-full text-left text-xs border-collapse min-w-[640px]">
+                      <thead>
+                        <tr className="border-b border-border bg-surface-elevated/60 text-[11px] text-muted">
+                          <th className="py-2 px-3 font-medium">Attendee</th>
+                          <th className="py-2 px-3 font-medium">Company</th>
+                          <th className="py-2 px-3 font-medium">Follow-Up Status</th>
+                          <th className="py-2 px-3 font-medium">Referrals</th>
+                          <th className="py-2 px-3 font-medium text-right">
+                            Actions
+                          </th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-border">
+                        {attendees.map((att) => {
+                          const st =
+                            att.postEventFollowUp?.status ?? "not_started";
+                          const badge = FOLLOW_LABELS[st];
+                          const refs = att.postEventFollowUp?.referralCount ?? 0;
+                          return (
+                            <tr key={att.id}>
+                              <td className="py-2.5 px-3">
+                                <span className="font-medium text-foreground block">
+                                  {att.person?.fullName ?? "Attendee"}
+                                </span>
+                                <span className="text-[11px] text-muted">
+                                  {att.person?.email ?? "No email in Folk"}
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3 text-muted">
+                                {att.person?.companyName ?? "—"}
+                              </td>
+                              <td className="py-2.5 px-3">
+                                <span
+                                  className={`rounded-full border px-2 py-0.5 text-[11px] ${badge.style}`}
+                                >
+                                  {badge.label}
+                                </span>
+                              </td>
+                              <td className="py-2.5 px-3 tabular-nums text-muted">
+                                {refs}
+                              </td>
+                              <td className="py-2.5 px-3 text-right">
+                                <div className="inline-flex items-center gap-1.5">
+                                  {st !== "sent" && st !== "replied" && (
+                                    <button
+                                      type="button"
+                                      disabled={busy}
+                                      onClick={() =>
+                                        markPostEventFollowUpStatus(
+                                          att.folkPersonLinkId,
+                                          "sent",
+                                        )
+                                      }
+                                      className="rounded border border-border px-2 py-1 text-[11px] hover:border-accent/50"
+                                    >
+                                      Mark Sent
+                                    </button>
+                                  )}
+                                  {st !== "replied" && (
+                                    <button
+                                      type="button"
+                                      disabled={busy}
+                                      onClick={() =>
+                                        markPostEventFollowUpStatus(
+                                          att.folkPersonLinkId,
+                                          "replied",
+                                        )
+                                      }
+                                      className="rounded border border-success/40 px-2 py-1 text-[11px] text-success hover:bg-success/10"
+                                    >
+                                      Mark Replied
+                                    </button>
+                                  )}
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
             <div className="rounded-xl border border-border bg-surface p-5 space-y-4">

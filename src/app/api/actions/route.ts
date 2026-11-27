@@ -1,6 +1,7 @@
-import { asc, desc, eq, inArray } from "drizzle-orm";
+import { asc, desc, eq } from "drizzle-orm";
 import { z } from "zod";
 import { getDb, isDatabaseConfigured, schema } from "@/db";
+import { findAwaitingReplyActivities } from "@/lib/actions/awaiting-reply";
 import { errorResponse } from "@/lib/api-auth";
 import { requireFounderSession } from "@/lib/auth";
 import { ensureAllowlistedFounders } from "@/lib/founders";
@@ -47,7 +48,7 @@ export async function GET() {
           .from(schema.outreachActivities)
           .where(eq(schema.outreachActivities.direction, "outbound"))
           .orderBy(desc(schema.outreachActivities.occurredAt))
-          .limit(50),
+          .limit(200),
       ]);
 
     const founderMap = new Map(founders.map((f) => [f.id, f]));
@@ -59,20 +60,16 @@ export async function GET() {
       .select({
         goldAccountId: schema.outreachActivities.goldAccountId,
         folkPersonLinkId: schema.outreachActivities.folkPersonLinkId,
+        conversationKey: schema.outreachActivities.conversationKey,
         occurredAt: schema.outreachActivities.occurredAt,
       })
       .from(schema.outreachActivities)
       .where(eq(schema.outreachActivities.direction, "inbound"));
 
-    const awaitingReplyActivities = outboundActivities.filter((out) => {
-      return !inboundRows.some(
-        (inb) =>
-          inb.occurredAt > out.occurredAt &&
-          ((out.folkPersonLinkId &&
-            inb.folkPersonLinkId === out.folkPersonLinkId) ||
-            (out.goldAccountId && inb.goldAccountId === out.goldAccountId)),
-      );
-    });
+    const awaitingReplyActivities = findAwaitingReplyActivities(
+      outboundActivities,
+      inboundRows,
+    );
 
     return Response.json({
       founders,

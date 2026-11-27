@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { findAwaitingReplyActivities } from "@/lib/actions/awaiting-reply";
 import {
   flagActionsForInboundReply,
   snoozeFollowUpAction,
@@ -72,5 +73,36 @@ describe("follow-up actions", () => {
     expect(updated[0]?.flaggedByReplyActivityId).toBe("reply_99");
     expect(updated[1]?.status).toBe("open");
     expect(updated[2]?.status).toBe("open");
+  });
+
+  it("preserves separate conversationKey threads when determining awaiting-reply outreach", () => {
+    const outbound = [
+      {
+        id: "out_breakfast",
+        goldAccountId: "gold_1",
+        folkPersonLinkId: "person_1",
+        conversationKey: "thread_breakfast",
+        occurredAt: new Date("2026-11-20T09:00:00Z"),
+      },
+      {
+        id: "out_commercial",
+        goldAccountId: "gold_1",
+        folkPersonLinkId: "person_1",
+        conversationKey: "thread_commercial",
+        occurredAt: new Date("2026-11-21T09:00:00Z"),
+      },
+    ];
+
+    const inbound = [
+      {
+        goldAccountId: "gold_1",
+        folkPersonLinkId: "person_1",
+        conversationKey: "thread_breakfast",
+        occurredAt: new Date("2026-11-22T10:00:00Z"),
+      },
+    ];
+
+    const awaiting = findAwaitingReplyActivities(outbound, inbound);
+    expect(awaiting.map((a) => a.id)).toEqual(["out_commercial"]);
   });
 });

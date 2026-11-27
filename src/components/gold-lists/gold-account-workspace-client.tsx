@@ -10,6 +10,7 @@ import {
   CalendarDays,
   Check,
   Clock3,
+  ExternalLink,
   Layers,
   MessageSquarePlus,
   RefreshCw,
@@ -60,6 +61,8 @@ export interface SerializedGoldWorkspace {
       email: string | null;
       jobTitle: string | null;
       linkedinUrl: string | null;
+      contactSuppressed?: boolean;
+      suppressionReason?: string | null;
     } | null;
   }>;
   intelligence: Array<{
@@ -150,6 +153,13 @@ const FACT_BADGE_STYLES: Record<string, string> = {
   unknown: "border-border bg-surface text-muted",
 };
 
+function safeExternalUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  const trimmed = url.trim();
+  if (/^https?:\/\//i.test(trimmed)) return trimmed;
+  return null;
+}
+
 export function GoldAccountWorkspaceClient({
   initialWorkspace,
   currentFounderUserId,
@@ -194,7 +204,7 @@ export function GoldAccountWorkspaceClient({
   const [actSubject, setActSubject] = useState("");
   const [actBody, setActBody] = useState("");
   const [actOccurredAt, setActOccurredAt] = useState("");
-  const [alsoLogToFolk, setAlsoLogToFolk] = useState(true);
+  const [alsoLogToFolk, setAlsoLogToFolk] = useState(false);
 
   // Create action form
   const [actionTitle, setActionTitle] = useState("");
@@ -353,6 +363,7 @@ export function GoldAccountWorkspaceClient({
   async function createAction(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
+    setBanner(null);
     try {
       const res = await fetch("/api/actions", {
         method: "POST",
@@ -365,10 +376,21 @@ export function GoldAccountWorkspaceClient({
           dueDate: new Date(actionDueDate).toISOString(),
         }),
       });
-      if (res.ok) {
-        setActionTitle("");
-        await refreshWorkspace();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setBanner({
+          kind: "error",
+          text: data.error ?? "Failed to create follow-up action",
+        });
+        return;
       }
+      setActionTitle("");
+      await refreshWorkspace();
+    } catch {
+      setBanner({
+        kind: "error",
+        text: "Network error creating follow-up action",
+      });
     } finally {
       setBusy(false);
     }
@@ -379,17 +401,29 @@ export function GoldAccountWorkspaceClient({
     payload: Record<string, unknown>,
   ) {
     setBusy(true);
+    setBanner(null);
     try {
       const res = await fetch(`/api/actions/${id}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (res.ok) {
-        setSnoozeTargetId(null);
-        setSnoozeReason("");
-        await refreshWorkspace();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setBanner({
+          kind: "error",
+          text: data.error ?? "Failed to update follow-up action",
+        });
+        return;
       }
+      setSnoozeTargetId(null);
+      setSnoozeReason("");
+      await refreshWorkspace();
+    } catch {
+      setBanner({
+        kind: "error",
+        text: "Network error updating follow-up action",
+      });
     } finally {
       setBusy(false);
     }
@@ -400,7 +434,19 @@ export function GoldAccountWorkspaceClient({
     try {
       const res = await fetch(`/api/folk/people?q=${encodeURIComponent(q)}`);
       const data = await res.json();
+      if (!res.ok) {
+        setBanner({
+          kind: "error",
+          text: data.error ?? "Failed to search Folk contacts",
+        });
+        return;
+      }
       setFolkPeople(data.people ?? []);
+    } catch {
+      setBanner({
+        kind: "error",
+        text: "Network error searching Folk contacts",
+      });
     } finally {
       setSearchingFolk(false);
     }
@@ -408,6 +454,7 @@ export function GoldAccountWorkspaceClient({
 
   async function linkFolkContact(p: FolkPersonOption) {
     setBusy(true);
+    setBanner(null);
     try {
       const res = await fetch(`/api/gold-lists/${ws.account.id}/contacts`, {
         method: "POST",
@@ -423,10 +470,21 @@ export function GoldAccountWorkspaceClient({
           isPrimaryDecisionMaker: isPrimaryDm,
         }),
       });
-      if (res.ok) {
-        setBanner({ kind: "info", text: `Mapped ${p.fullName} (${contactRole}).` });
-        await refreshWorkspace();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setBanner({
+          kind: "error",
+          text: data.error ?? `Failed to map ${p.fullName}`,
+        });
+        return;
       }
+      setBanner({ kind: "info", text: `Mapped ${p.fullName} (${contactRole}).` });
+      await refreshWorkspace();
+    } catch {
+      setBanner({
+        kind: "error",
+        text: "Network error mapping Folk contact",
+      });
     } finally {
       setBusy(false);
     }
@@ -635,6 +693,30 @@ export function GoldAccountWorkspaceClient({
             Save Fit
           </button>
         </form>
+
+        {ws.account.legacyScoreMetadataJson &&
+          Object.keys(ws.account.legacyScoreMetadataJson).length > 0 && (
+            <div className="rounded-lg border border-border bg-surface-elevated p-3 text-xs space-y-1.5">
+              <p className="font-medium text-muted">
+                Legacy spreadsheet metadata (read-only archive — not used for ranking)
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(ws.account.legacyScoreMetadataJson).map(
+                  ([key, val]) => (
+                    <span
+                      key={key}
+                      className="rounded border border-border bg-surface px-2 py-0.5 text-[11px] text-muted"
+                    >
+                      <strong className="text-foreground">{key}:</strong>{" "}
+                      {typeof val === "string" || typeof val === "number"
+                        ? String(val)
+                        : JSON.stringify(val)}
+                    </span>
+                  ),
+                )}
+              </div>
+            </div>
+          )}
       </section>
 
       {/* Tabs */}
@@ -1048,12 +1130,25 @@ export function GoldAccountWorkspaceClient({
                     className="rounded-lg border border-border bg-surface-elevated p-3 text-xs flex items-center justify-between gap-2"
                   >
                     <div>
-                      <p className="font-semibold text-foreground">
-                        {c.person?.fullName ?? "Unknown"}{" "}
-                        <span className="font-mono text-[10px] text-accent">
-                          [{c.roleCategory}]
-                        </span>
-                      </p>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <p className="font-semibold text-foreground">
+                          {c.person?.fullName ?? "Unknown"}{" "}
+                          <span className="font-mono text-[10px] text-accent">
+                            [{c.roleCategory}]
+                          </span>
+                        </p>
+                        {c.person?.contactSuppressed && (
+                          <span
+                            title={
+                              c.person.suppressionReason ??
+                              "Marked Do Not Contact"
+                            }
+                            className="rounded border border-danger/40 bg-danger/15 px-1.5 py-0.5 text-[10px] font-medium text-danger"
+                          >
+                            Do Not Contact
+                          </span>
+                        )}
+                      </div>
                       <p className="text-muted">
                         {[c.person?.jobTitle, c.person?.email]
                           .filter(Boolean)
@@ -1063,10 +1158,19 @@ export function GoldAccountWorkspaceClient({
                     <button
                       type="button"
                       onClick={async () => {
-                        await fetch(
+                        setBanner(null);
+                        const res = await fetch(
                           `/api/gold-lists/${ws.account.id}/contacts?contactId=${c.id}`,
                           { method: "DELETE" },
                         );
+                        if (!res.ok) {
+                          const data = await res.json().catch(() => ({}));
+                          setBanner({
+                            kind: "error",
+                            text: data.error ?? "Failed to remove mapped contact",
+                          });
+                          return;
+                        }
                         await refreshWorkspace();
                       }}
                       className="text-muted hover:text-danger"
@@ -1085,15 +1189,27 @@ export function GoldAccountWorkspaceClient({
               <form
                 onSubmit={async (e) => {
                   e.preventDefault();
-                  await fetch(`/api/gold-lists/${ws.account.id}/contacts`, {
-                    method: "POST",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({
-                      mode: "gap",
-                      roleCategory: gapRole,
-                      notes: gapNotes || null,
-                    }),
-                  });
+                  setBanner(null);
+                  const res = await fetch(
+                    `/api/gold-lists/${ws.account.id}/contacts`,
+                    {
+                      method: "POST",
+                      headers: { "Content-Type": "application/json" },
+                      body: JSON.stringify({
+                        mode: "gap",
+                        roleCategory: gapRole,
+                        notes: gapNotes || null,
+                      }),
+                    },
+                  );
+                  if (!res.ok) {
+                    const data = await res.json().catch(() => ({}));
+                    setBanner({
+                      kind: "error",
+                      text: data.error ?? "Failed to record coverage gap",
+                    });
+                    return;
+                  }
                   setGapNotes("");
                   await refreshWorkspace();
                 }}
@@ -1305,26 +1421,81 @@ export function GoldAccountWorkspaceClient({
                     <p className="text-xs text-muted">No entries yet.</p>
                   ) : (
                     <ul className="space-y-2 text-xs">
-                      {items.map((item) => (
-                        <li
-                          key={item.id}
-                          className="rounded-lg border border-border bg-surface-elevated p-3 space-y-1"
-                        >
-                          <div className="flex items-center justify-between gap-2">
-                            <span
-                              className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${FACT_BADGE_STYLES[item.factType]}`}
-                            >
-                              {item.factType}
-                            </span>
-                            <span className="text-[10px] text-muted">
-                              {item.evidenceDate
-                                ? `Evidence: ${new Date(item.evidenceDate).toLocaleDateString("en-GB")}`
-                                : `Observed: ${new Date(item.observedAt).toLocaleDateString("en-GB")}`}
-                            </span>
-                          </div>
-                          <p className="text-foreground">{item.summary}</p>
-                        </li>
-                      ))}
+                      {items.map((item) => {
+                        const validUrl = safeExternalUrl(item.sourceUrl);
+                        return (
+                          <li
+                            key={item.id}
+                            className="rounded-lg border border-border bg-surface-elevated p-3 space-y-1.5"
+                          >
+                            <div className="flex items-center justify-between gap-2">
+                              <span
+                                className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${FACT_BADGE_STYLES[item.factType]}`}
+                              >
+                                {item.factType}
+                              </span>
+                              <div className="flex items-center gap-2">
+                                <span className="text-[10px] text-muted">
+                                  {item.evidenceDate
+                                    ? `Evidence: ${new Date(item.evidenceDate).toLocaleDateString("en-GB")}`
+                                    : `Observed: ${new Date(item.observedAt).toLocaleDateString("en-GB")}`}
+                                </span>
+                                <button
+                                  type="button"
+                                  disabled={busy}
+                                  title="Delete entry"
+                                  onClick={async () => {
+                                    setBusy(true);
+                                    setBanner(null);
+                                    try {
+                                      const res = await fetch(
+                                        `/api/gold-lists/${ws.account.id}/intelligence?intelligenceId=${item.id}`,
+                                        { method: "DELETE" },
+                                      );
+                                      if (!res.ok) {
+                                        const data = await res
+                                          .json()
+                                          .catch(() => ({}));
+                                        setBanner({
+                                          kind: "error",
+                                          text:
+                                            data.error ??
+                                            "Failed to delete intelligence entry",
+                                        });
+                                        return;
+                                      }
+                                      await refreshWorkspace();
+                                    } finally {
+                                      setBusy(false);
+                                    }
+                                  }}
+                                  className="text-muted hover:text-danger"
+                                >
+                                  <Trash2 className="h-3 w-3" />
+                                </button>
+                              </div>
+                            </div>
+                            <p className="text-foreground">{item.summary}</p>
+                            {(validUrl || item.sourceNote) && (
+                              <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted pt-0.5">
+                                {validUrl && (
+                                  <a
+                                    href={validUrl}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="inline-flex items-center gap-1 text-accent hover:underline"
+                                  >
+                                    Source <ExternalLink className="h-3 w-3" />
+                                  </a>
+                                )}
+                                {item.sourceNote && (
+                                  <span>{item.sourceNote}</span>
+                                )}
+                              </div>
+                            )}
+                          </li>
+                        );
+                      })}
                     </ul>
                   )}
                 </div>
@@ -1443,34 +1614,85 @@ export function GoldAccountWorkspaceClient({
                 No buying signals recorded yet.
               </div>
             ) : (
-              ws.signals.map((s) => (
-                <div
-                  key={s.id}
-                  className="rounded-xl border border-border bg-surface p-4 text-xs space-y-1.5"
-                >
-                  <div className="flex items-center justify-between gap-2 flex-wrap">
-                    <div className="flex items-center gap-2">
-                      <span className="font-mono text-accent">
-                        [{s.signalType}]
-                      </span>
-                      <span
-                        className={`rounded-full border px-2 py-0.5 text-[10px] ${FACT_BADGE_STYLES[s.factType]}`}
-                      >
-                        {s.factType}
-                      </span>
+              ws.signals.map((s) => {
+                const validUrl = safeExternalUrl(s.sourceUrl);
+                return (
+                  <div
+                    key={s.id}
+                    className="rounded-xl border border-border bg-surface p-4 text-xs space-y-1.5"
+                  >
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono text-accent">
+                          [{s.signalType}]
+                        </span>
+                        <span
+                          className={`rounded-full border px-2 py-0.5 text-[10px] ${FACT_BADGE_STYLES[s.factType]}`}
+                        >
+                          {s.factType}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2.5">
+                        <span className="text-muted">
+                          {s.signalDate
+                            ? `Signal date: ${new Date(s.signalDate).toLocaleDateString("en-GB")}`
+                            : `Observed: ${new Date(s.observedAt).toLocaleDateString("en-GB")}`}
+                        </span>
+                        <button
+                          type="button"
+                          disabled={busy}
+                          title="Delete buying signal"
+                          onClick={async () => {
+                            setBusy(true);
+                            setBanner(null);
+                            try {
+                              const res = await fetch(
+                                `/api/gold-lists/${ws.account.id}/signals?signalId=${s.id}`,
+                                { method: "DELETE" },
+                              );
+                              if (!res.ok) {
+                                const data = await res.json().catch(() => ({}));
+                                setBanner({
+                                  kind: "error",
+                                  text:
+                                    data.error ??
+                                    "Failed to delete buying signal",
+                                });
+                                return;
+                              }
+                              await refreshWorkspace();
+                            } finally {
+                              setBusy(false);
+                            }
+                          }}
+                          className="text-muted hover:text-danger"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
+                      </div>
                     </div>
-                    <span className="text-muted">
-                      {s.signalDate
-                        ? `Signal date: ${new Date(s.signalDate).toLocaleDateString("en-GB")}`
-                        : `Observed: ${new Date(s.observedAt).toLocaleDateString("en-GB")}`}
-                    </span>
+                    <p className="text-sm font-semibold text-foreground">
+                      {s.title}
+                    </p>
+                    {s.details && <p className="text-muted">{s.details}</p>}
+                    {(validUrl || s.sourceNote) && (
+                      <div className="flex flex-wrap items-center gap-2 text-[11px] text-muted pt-0.5">
+                        {validUrl && (
+                          <a
+                            href={validUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 text-accent hover:underline"
+                          >
+                            Source <ExternalLink className="h-3 w-3" />
+                          </a>
+                        )}
+                        {s.sourceNote && <span>{s.sourceNote}</span>}
+                      </div>
+                    )}
                   </div>
-                  <p className="text-sm font-semibold text-foreground">
-                    {s.title}
-                  </p>
-                  {s.details && <p className="text-muted">{s.details}</p>}
-                </div>
-              ))
+                );
+              })
             )}
           </div>
         </div>

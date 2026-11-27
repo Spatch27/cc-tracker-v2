@@ -7,6 +7,8 @@ import {
   AlertTriangle,
   Building2,
   Crown,
+  LayoutGrid,
+  List,
   Plus,
   Search,
   Sparkles,
@@ -50,6 +52,21 @@ interface FolkCompanyOption {
   industries: string[];
 }
 
+type SignalContactFilter =
+  | "all"
+  | "has_gaps"
+  | "no_contacts"
+  | "has_signals"
+  | "no_outreach"
+  | "open_actions";
+
+type SortMode =
+  | "recent"
+  | "name_asc"
+  | "actions_desc"
+  | "activity_desc"
+  | "activity_asc";
+
 export function GoldListsClient({
   initialAccounts,
   founders,
@@ -68,6 +85,10 @@ export function GoldListsClient({
   const [ownerCounts, setOwnerCounts] =
     useState<Record<string, number>>(initialOwnerCounts);
   const [ownerFilter, setOwnerFilter] = useState<string>("all_active");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [quickFilter, setQuickFilter] = useState<SignalContactFilter>("all");
+  const [sortMode, setSortMode] = useState<SortMode>("name_asc");
+  const [viewMode, setViewMode] = useState<"table" | "cards">("table");
   const [showAdd, setShowAdd] = useState(false);
 
   const [companyQuery, setCompanyQuery] = useState("");
@@ -140,11 +161,61 @@ export function GoldListsClient({
     }
   }
 
-  const filtered = accounts.filter((a) => {
+  const ownerScoped = accounts.filter((a) => {
     if (ownerFilter === "all_active") return a.status === "active";
     if (ownerFilter === "archived") return a.status === "archived";
     return a.status === "active" && a.ownerUserId === ownerFilter;
   });
+
+  const qLower = searchQuery.trim().toLowerCase();
+  const filtered = ownerScoped
+    .filter((a) => {
+      if (quickFilter === "has_gaps" && a.coverageGapsCount === 0) return false;
+      if (quickFilter === "no_contacts" && a.mappedContactsCount > 0) return false;
+      if (quickFilter === "has_signals" && !a.latestSignal) return false;
+      if (quickFilter === "no_outreach" && a.lastActivityAt !== null) return false;
+      if (quickFilter === "open_actions" && a.openActionsCount === 0) return false;
+
+      if (!qLower) return true;
+      const hay = [
+        a.companyName,
+        a.companyDomain,
+        a.ownerName,
+        a.latestSignal?.title,
+        a.legacySetupNotes,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return hay.includes(qLower);
+    })
+    .slice()
+    .sort((a, b) => {
+      if (sortMode === "name_asc") {
+        return a.companyName.localeCompare(b.companyName);
+      }
+      if (sortMode === "actions_desc") {
+        return (
+          b.openActionsCount - a.openActionsCount ||
+          a.companyName.localeCompare(b.companyName)
+        );
+      }
+      if (sortMode === "activity_desc") {
+        const at = a.lastActivityAt ? new Date(a.lastActivityAt).getTime() : 0;
+        const bt = b.lastActivityAt ? new Date(b.lastActivityAt).getTime() : 0;
+        return bt - at || a.companyName.localeCompare(b.companyName);
+      }
+      if (sortMode === "activity_asc") {
+        const at = a.lastActivityAt
+          ? new Date(a.lastActivityAt).getTime()
+          : Number.MAX_SAFE_INTEGER;
+        const bt = b.lastActivityAt
+          ? new Date(b.lastActivityAt).getTime()
+          : Number.MAX_SAFE_INTEGER;
+        return at - bt || a.companyName.localeCompare(b.companyName);
+      }
+      return 0;
+    });
 
   const selectedOwnerCount = ownerCounts[selectedOwnerId] ?? 0;
   const selectedOwnerAtCap =
@@ -191,8 +262,8 @@ export function GoldListsClient({
       {!dbReady && (
         <div className="rounded-xl border border-warning/40 bg-warning/10 p-4 text-xs text-warning">
           Database tables need an update for Phase 3. Go to{" "}
-          <Link href="/" className="underline font-semibold">
-            Overview
+          <Link href="/admin" className="underline font-semibold">
+            Administration
           </Link>{" "}
           and click <strong>Re-check / Update Database Tables</strong>.
         </div>
@@ -260,15 +331,206 @@ export function GoldListsClient({
         </div>
       </div>
 
+      {/* Search, Quick Filters, Sort & View Mode */}
+      <div className="rounded-xl border border-border bg-surface p-4 space-y-3">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2.5">
+          <div className="relative flex-1">
+            <Search className="h-3.5 w-3.5 text-muted absolute left-3 top-2.5" />
+            <input
+              type="text"
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              placeholder="Search company, domain, owner, buying signal, or notes..."
+              className="w-full rounded-lg border border-border bg-surface-elevated pl-8 pr-3 py-1.5 text-xs"
+            />
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <select
+              aria-label="Sort Gold accounts"
+              value={sortMode}
+              onChange={(e) => setSortMode(e.target.value as SortMode)}
+              className="rounded-lg border border-border bg-surface-elevated px-2.5 py-1.5 text-xs"
+            >
+              <option value="name_asc">Company A–Z</option>
+              <option value="recent">Recently Updated</option>
+              <option value="actions_desc">Most Open Actions</option>
+              <option value="activity_desc">Most Recent Outreach</option>
+              <option value="activity_asc">Least Recent Outreach</option>
+            </select>
+
+            <div className="inline-flex rounded-lg border border-border bg-surface-elevated p-0.5 text-xs">
+              <button
+                type="button"
+                onClick={() => setViewMode("table")}
+                title="Table view"
+                className={`inline-flex items-center gap-1 rounded-md px-2 py-1 ${
+                  viewMode === "table"
+                    ? "bg-surface text-foreground font-medium"
+                    : "text-muted hover:text-foreground"
+                }`}
+              >
+                <List className="h-3.5 w-3.5" />
+                Table
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode("cards")}
+                title="Card view"
+                className={`inline-flex items-center gap-1 rounded-md px-2 py-1 ${
+                  viewMode === "cards"
+                    ? "bg-surface text-foreground font-medium"
+                    : "text-muted hover:text-foreground"
+                }`}
+              >
+                <LayoutGrid className="h-3.5 w-3.5" />
+                Cards
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+          <div className="flex flex-wrap gap-1.5">
+            {(
+              [
+                ["all", "All"],
+                ["no_contacts", "Needs Contacts"],
+                ["has_gaps", "Has Coverage Gaps"],
+                ["has_signals", "Has Signals"],
+                ["no_outreach", "No Outreach Yet"],
+                ["open_actions", "Has Open Actions"],
+              ] as const
+            ).map(([key, label]) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setQuickFilter(key)}
+                className={`rounded-full border px-2.5 py-0.5 text-[11px] transition-colors ${
+                  quickFilter === key
+                    ? "border-accent bg-accent/15 text-accent font-medium"
+                    : "border-border bg-surface-elevated text-muted hover:text-foreground"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+          <span className="text-[11px] text-muted">
+            Showing {filtered.length} of {ownerScoped.length}
+          </span>
+        </div>
+      </div>
+
       {filtered.length === 0 ? (
         <div className="rounded-xl border border-border bg-surface p-8 text-center space-y-2">
           <p className="text-sm font-medium">
-            No Gold accounts in this view yet
+            {ownerScoped.length === 0
+              ? "No Gold accounts in this view yet"
+              : "No Gold accounts match your current search or filter"}
           </p>
           <p className="text-xs text-muted">
-            Click <strong className="text-foreground">Add Gold Account</strong>{" "}
-            to link a company from Folk CRM and map marketing decision-makers.
+            {ownerScoped.length === 0
+              ? "Click Add Gold Account or Import from Excel to add companies from Folk CRM."
+              : "Clear your search or switch filter pills to see all accounts."}
           </p>
+        </div>
+      ) : viewMode === "table" ? (
+        <div className="rounded-xl border border-border bg-surface overflow-x-auto">
+          <table className="w-full text-left text-xs border-collapse min-w-[780px]">
+            <thead>
+              <tr className="border-b border-border bg-surface-elevated/60 text-[11px] text-muted">
+                <th className="py-2.5 px-4 font-medium">Company</th>
+                <th className="py-2.5 px-3 font-medium">Owner</th>
+                <th className="py-2.5 px-3 font-medium">Fit &amp; Team</th>
+                <th className="py-2.5 px-3 font-medium">Contacts</th>
+                <th className="py-2.5 px-3 font-medium">Latest Signal</th>
+                <th className="py-2.5 px-3 font-medium text-right">Actions</th>
+                <th className="py-2.5 px-4 font-medium text-right">
+                  Last Activity
+                </th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {filtered.map((acc) => (
+                <tr
+                  key={acc.id}
+                  onClick={() => router.push(`/gold-lists/${acc.id}`)}
+                  className="hover:bg-surface-elevated/50 cursor-pointer transition-colors"
+                >
+                  <td className="py-3 px-4">
+                    <Link
+                      href={`/gold-lists/${acc.id}`}
+                      className="font-semibold text-foreground hover:text-accent block"
+                    >
+                      {acc.companyName}
+                    </Link>
+                    <span className="text-[11px] text-muted">
+                      {acc.companyDomain ?? "No domain"}
+                    </span>
+                  </td>
+                  <td className="py-3 px-3 text-foreground whitespace-nowrap">
+                    {acc.ownerName}
+                  </td>
+                  <td className="py-3 px-3">
+                    <span
+                      className={`inline-block rounded-full px-2 py-0.5 border text-[11px] whitespace-nowrap ${
+                        acc.fit.meetsTeamSizeCriteria
+                          ? "border-success/30 bg-success/10 text-success"
+                          : "border-border bg-surface-elevated text-muted"
+                      }`}
+                    >
+                      {acc.fit.summaryLabel}
+                    </span>
+                  </td>
+                  <td className="py-3 px-3 whitespace-nowrap text-muted">
+                    <span
+                      className={
+                        acc.mappedContactsCount === 0
+                          ? "text-warning font-medium"
+                          : "text-foreground"
+                      }
+                    >
+                      {acc.mappedContactsCount} mapped
+                    </span>
+                    {acc.coverageGapsCount > 0 && (
+                      <span className="text-warning">
+                        {" "}
+                        · {acc.coverageGapsCount} gap
+                        {acc.coverageGapsCount === 1 ? "" : "s"}
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-3 px-3 max-w-[220px]">
+                    {acc.latestSignal ? (
+                      <span className="truncate block text-foreground">
+                        <strong className="font-mono text-accent">
+                          [{acc.latestSignal.signalType}]
+                        </strong>{" "}
+                        {acc.latestSignal.title}
+                      </span>
+                    ) : (
+                      <span className="text-muted">—</span>
+                    )}
+                  </td>
+                  <td className="py-3 px-3 text-right tabular-nums">
+                    {acc.openActionsCount > 0 ? (
+                      <span className="rounded-full bg-accent/15 text-accent px-2 py-0.5 font-medium">
+                        {acc.openActionsCount}
+                      </span>
+                    ) : (
+                      <span className="text-muted">0</span>
+                    )}
+                  </td>
+                  <td className="py-3 px-4 text-right text-muted whitespace-nowrap">
+                    {acc.lastActivityAt
+                      ? new Date(acc.lastActivityAt).toLocaleDateString("en-GB")
+                      : "None yet"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
@@ -431,7 +693,10 @@ export function GoldListsClient({
               </div>
             )}
 
-            <form onSubmit={handleCreate} className="space-y-3 border-t border-border pt-3 text-xs">
+            <form
+              onSubmit={handleCreate}
+              className="space-y-3 border-t border-border pt-3 text-xs"
+            >
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="text-muted block mb-1">

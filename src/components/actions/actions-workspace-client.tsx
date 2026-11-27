@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { Check, Clock3, MailQuestion } from "lucide-react";
+import { Check, Clock3, MailQuestion, Plus, X } from "lucide-react";
 import type { FounderOption } from "@/lib/founders";
 import { classifyFollowUpActions } from "@/lib/gold-lists/rules";
 
@@ -30,6 +30,7 @@ export interface SerializedAwaitingActivity {
   goldAccountId: string | null;
   companyName: string | null;
   personName: string | null;
+  ownerUserId?: string | null;
   ownerName: string | null;
   channel: string;
   subject: string | null;
@@ -40,13 +41,18 @@ export function ActionsWorkspaceClient({
   initialActions,
   awaitingReplyActivities,
   founders,
+  currentFounderUserId = null,
 }: {
   initialActions: SerializedActionItem[];
   awaitingReplyActivities: SerializedAwaitingActivity[];
   founders: FounderOption[];
+  currentFounderUserId?: string | null;
 }) {
   const router = useRouter();
   const [actions, setActions] = useState<SerializedActionItem[]>(initialActions);
+  const [awaitingList, setAwaitingList] = useState<SerializedAwaitingActivity[]>(
+    awaitingReplyActivities,
+  );
   const [ownerFilter, setOwnerFilter] = useState("all");
   const [queueTab, setQueueTab] = useState<
     "all_open" | "needs_review" | "overdue" | "due_today" | "awaiting_reply" | "completed"
@@ -55,11 +61,30 @@ export function ActionsWorkspaceClient({
   const [snoozeDate, setSnoozeDate] = useState("");
   const [snoozeReason, setSnoozeReason] = useState("");
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  // Create action form
+  const [showNewForm, setShowNewForm] = useState(false);
+  const [newTitle, setNewTitle] = useState("");
+  const [newOwnerId, setNewOwnerId] = useState(
+    currentFounderUserId ?? founders[0]?.id ?? "",
+  );
+  const [newDueDate, setNewDueDate] = useState(() => {
+    const d = new Date();
+    d.setDate(d.getDate() + 2);
+    return d.toISOString().slice(0, 16);
+  });
+  const [newNotes, setNewNotes] = useState("");
 
   const ownerScoped =
     ownerFilter === "all"
       ? actions
       : actions.filter((a) => a.ownerUserId === ownerFilter);
+
+  const awaitingScoped =
+    ownerFilter === "all"
+      ? awaitingList
+      : awaitingList.filter((a) => a.ownerUserId === ownerFilter);
 
   const classified = classifyFollowUpActions(
     ownerScoped.map((a) => ({ ...a, dueDate: new Date(a.dueDate) })),
@@ -78,7 +103,17 @@ export function ActionsWorkspaceClient({
     ];
   })();
 
+  async function refreshActions() {
+    const listRes = await fetch("/api/actions");
+    if (listRes.ok) {
+      const data = await listRes.json();
+      setActions(data.actions ?? []);
+      setAwaitingList(data.awaitingReplyActivities ?? []);
+    }
+  }
+
   async function mutateAction(id: string, payload: Record<string, unknown>) {
+    setError(null);
     setBusy(true);
     try {
       const res = await fetch(`/api/actions/${id}`, {
@@ -86,16 +121,50 @@ export function ActionsWorkspaceClient({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (res.ok) {
-        const listRes = await fetch("/api/actions");
-        if (listRes.ok) {
-          const data = await listRes.json();
-          setActions(data.actions);
-        }
-        setSnoozeId(null);
-        setSnoozeReason("");
-        router.refresh();
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(data.error ?? "Failed to update follow-up action");
+        return;
       }
+      await refreshActions();
+      setSnoozeId(null);
+      setSnoozeReason("");
+      router.refresh();
+    } catch {
+      setError("Network error updating follow-up action");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function handleCreateAction(e: React.FormEvent) {
+    e.preventDefault();
+    if (!newTitle.trim() || !newOwnerId || !newDueDate) return;
+    setError(null);
+    setBusy(true);
+    try {
+      const res = await fetch("/api/actions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ownerUserId: newOwnerId,
+          title: newTitle.trim(),
+          notes: newNotes.trim() || null,
+          dueDate: new Date(newDueDate).toISOString(),
+        }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(data.error ?? "Failed to create follow-up action");
+        return;
+      }
+      setNewTitle("");
+      setNewNotes("");
+      setShowNewForm(false);
+      await refreshActions();
+      router.refresh();
+    } catch {
+      setError("Network error creating follow-up action");
     } finally {
       setBusy(false);
     }
@@ -116,28 +185,114 @@ export function ActionsWorkspaceClient({
           </div>
         </div>
 
-        <select
-          value={ownerFilter}
-          onChange={(e) => setOwnerFilter(e.target.value)}
-          className="rounded-lg border border-border bg-surface-elevated px-3 py-1.5 text-xs"
-        >
-          <option value="all">Both Founders</option>
-          {founders.map((f) => (
-            <option key={f.id} value={f.id}>
-              {f.name}
-            </option>
-          ))}
-        </select>
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            value={ownerFilter}
+            onChange={(e) => setOwnerFilter(e.target.value)}
+            className="rounded-lg border border-border bg-surface-elevated px-3 py-1.5 text-xs"
+          >
+            <option value="all">Both Founders</option>
+            {founders.map((f) => (
+              <option key={f.id} value={f.id}>
+                {f.name}
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            onClick={() => setShowNewForm((prev) => !prev)}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-1.5 text-xs font-semibold text-accent-foreground hover:opacity-90"
+          >
+            <Plus className="h-3.5 w-3.5" />
+            New Action
+          </button>
+        </div>
       </div>
+
+      {error && (
+        <div className="rounded-xl border border-danger/40 bg-danger/10 p-3 text-xs text-danger flex items-center justify-between">
+          <span>{error}</span>
+          <button type="button" onClick={() => setError(null)}>
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
+      {showNewForm && (
+        <form
+          onSubmit={handleCreateAction}
+          className="rounded-xl border border-border bg-surface p-4 space-y-3 text-xs"
+        >
+          <div className="flex items-center justify-between">
+            <h2 className="font-semibold text-foreground">
+              Add Follow-Up Action
+            </h2>
+            <button
+              type="button"
+              onClick={() => setShowNewForm(false)}
+              className="text-muted hover:text-foreground"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <input
+              type="text"
+              required
+              value={newTitle}
+              onChange={(e) => setNewTitle(e.target.value)}
+              placeholder="Next action title *"
+              className="sm:col-span-2 rounded-lg border border-border bg-surface-elevated px-3 py-2"
+            />
+            <select
+              value={newOwnerId}
+              onChange={(e) => setNewOwnerId(e.target.value)}
+              className="rounded-lg border border-border bg-surface-elevated px-3 py-2"
+            >
+              {founders.map((f) => (
+                <option key={f.id} value={f.id}>
+                  {f.name}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <input
+              type="datetime-local"
+              required
+              value={newDueDate}
+              onChange={(e) => setNewDueDate(e.target.value)}
+              className="rounded-lg border border-border bg-surface-elevated px-3 py-2"
+            />
+            <input
+              type="text"
+              value={newNotes}
+              onChange={(e) => setNewNotes(e.target.value)}
+              placeholder="Optional context note"
+              className="sm:col-span-2 rounded-lg border border-border bg-surface-elevated px-3 py-2"
+            />
+          </div>
+          <button
+            type="submit"
+            disabled={busy}
+            className="rounded-lg bg-accent px-4 py-1.5 font-semibold text-accent-foreground disabled:opacity-40"
+          >
+            Save Action
+          </button>
+        </form>
+      )}
 
       <div className="flex flex-wrap gap-2">
         {(
           [
-            ["all_open", `All Open (${classified.overdue.length + classified.dueToday.length + classified.upcoming.length})`],
+            [
+              "all_open",
+              `All Open (${classified.overdue.length + classified.dueToday.length + classified.upcoming.length})`,
+            ],
             ["needs_review", `Needs Review (${classified.needsReview.length})`],
             ["overdue", `Overdue (${classified.overdue.length})`],
             ["due_today", `Due Today (${classified.dueToday.length})`],
-            ["awaiting_reply", `Awaiting Reply (${awaitingReplyActivities.length})`],
+            ["awaiting_reply", `Awaiting Reply (${awaitingScoped.length})`],
             ["completed", `Completed (${classified.completed.length})`],
           ] as const
         ).map(([key, label]) => (
@@ -158,12 +313,12 @@ export function ActionsWorkspaceClient({
 
       {queueTab === "awaiting_reply" ? (
         <div className="space-y-2.5">
-          {awaitingReplyActivities.length === 0 ? (
+          {awaitingScoped.length === 0 ? (
             <div className="rounded-xl border border-border bg-surface p-6 text-xs text-muted">
               No outbound outreach currently awaiting reply.
             </div>
           ) : (
-            awaitingReplyActivities.map((act) => (
+            awaitingScoped.map((act) => (
               <div
                 key={act.id}
                 className="rounded-xl border border-border bg-surface p-4 text-xs flex items-center justify-between gap-3"
@@ -188,7 +343,7 @@ export function ActionsWorkspaceClient({
                 {act.goldAccountId && (
                   <Link
                     href={`/gold-lists/${act.goldAccountId}`}
-                    className="text-accent hover:underline font-medium"
+                    className="text-accent hover:underline font-medium shrink-0"
                   >
                     Open account →
                   </Link>
@@ -219,6 +374,11 @@ export function ActionsWorkspaceClient({
                         Reply arrived — review
                       </span>
                     )}
+                    {act.status === "cancelled" && (
+                      <span className="rounded bg-surface-elevated text-muted px-2 py-0.5 text-[10px]">
+                        Cancelled
+                      </span>
+                    )}
                   </div>
                   <p className="text-muted">
                     Owner: <strong className="text-foreground">{act.ownerName}</strong> ·
@@ -228,7 +388,7 @@ export function ActionsWorkspaceClient({
                   </p>
                 </div>
 
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   {act.goldAccountId && (
                     <Link
                       href={`/gold-lists/${act.goldAccountId}`}
@@ -237,7 +397,7 @@ export function ActionsWorkspaceClient({
                       Open Account
                     </Link>
                   )}
-                  {act.status !== "completed" && (
+                  {act.status !== "completed" && act.status !== "cancelled" && (
                     <>
                       <button
                         type="button"
@@ -255,6 +415,16 @@ export function ActionsWorkspaceClient({
                         className="rounded-lg border border-border px-2.5 py-1 text-muted hover:text-foreground"
                       >
                         Snooze
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() =>
+                          mutateAction(act.id, { action: "cancel" })
+                        }
+                        className="rounded-lg border border-danger/30 px-2.5 py-1 text-danger/90 hover:bg-danger/10"
+                      >
+                        Cancel
                       </button>
                     </>
                   )}

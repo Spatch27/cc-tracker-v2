@@ -7,6 +7,7 @@ import {
 } from "@/components/actions/actions-workspace-client";
 import { AppShell } from "@/components/app-shell";
 import { getDb, isDatabaseConfigured, schema } from "@/db";
+import { findAwaitingReplyActivities } from "@/lib/actions/awaiting-reply";
 import { getFounderAccessState } from "@/lib/auth";
 import { ensureAllowlistedFounders, type FounderOption } from "@/lib/founders";
 
@@ -40,11 +41,12 @@ export default async function ActionsPage() {
             .from(schema.outreachActivities)
             .where(eq(schema.outreachActivities.direction, "outbound"))
             .orderBy(desc(schema.outreachActivities.occurredAt))
-            .limit(50),
+            .limit(200),
           db
             .select({
               goldAccountId: schema.outreachActivities.goldAccountId,
               folkPersonLinkId: schema.outreachActivities.folkPersonLinkId,
+              conversationKey: schema.outreachActivities.conversationKey,
               occurredAt: schema.outreachActivities.occurredAt,
             })
             .from(schema.outreachActivities)
@@ -74,18 +76,8 @@ export default async function ActionsPage() {
         };
       });
 
-      awaitingReply = outboundRows
-        .filter(
-          (out) =>
-            !inboundRows.some(
-              (inb) =>
-                inb.occurredAt > out.occurredAt &&
-                ((out.folkPersonLinkId &&
-                  inb.folkPersonLinkId === out.folkPersonLinkId) ||
-                  (out.goldAccountId && inb.goldAccountId === out.goldAccountId)),
-            ),
-        )
-        .map((act) => {
+      awaitingReply = findAwaitingReplyActivities(outboundRows, inboundRows).map(
+        (act) => {
           const acc = act.goldAccountId
             ? accountMap.get(act.goldAccountId)
             : undefined;
@@ -98,6 +90,7 @@ export default async function ActionsPage() {
             goldAccountId: act.goldAccountId,
             companyName: comp?.name ?? null,
             personName: p?.fullName ?? null,
+            ownerUserId: act.ownerUserId,
             ownerName: act.ownerUserId
               ? founderMap.get(act.ownerUserId)?.name ?? null
               : null,
@@ -105,7 +98,8 @@ export default async function ActionsPage() {
             subject: act.subject,
             occurredAt: act.occurredAt.toISOString(),
           };
-        });
+        },
+      );
     } catch {
       actions = [];
       awaitingReply = [];
@@ -118,6 +112,7 @@ export default async function ActionsPage() {
         initialActions={actions}
         awaitingReplyActivities={awaitingReply}
         founders={founders}
+        currentFounderUserId={founder?.userId ?? null}
       />
     </AppShell>
   );

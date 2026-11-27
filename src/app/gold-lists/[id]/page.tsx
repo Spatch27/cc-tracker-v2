@@ -74,6 +74,8 @@ export default async function GoldAccountDetailPage({
             email: c.person.email,
             jobTitle: c.person.jobTitle,
             linkedinUrl: c.person.linkedinUrl,
+            contactSuppressed: c.person.contactSuppressed,
+            suppressionReason: c.person.suppressionReason,
           }
         : null,
     })),

@@ -1,3 +1,4 @@
+import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { getDb, isDatabaseConfigured, schema } from "@/db";
 import { errorResponse } from "@/lib/api-auth";
@@ -68,6 +69,63 @@ export async function POST(
     });
 
     return Response.json({ signal: created }, { status: 201 });
+  } catch (err) {
+    return errorResponse(err);
+  }
+}
+
+export async function DELETE(
+  request: Request,
+  context: { params: Promise<{ id: string }> },
+) {
+  try {
+    const founder = await requireFounderSession();
+    if (!isDatabaseConfigured()) {
+      return Response.json(
+        { error: "Database is not configured" },
+        { status: 503 },
+      );
+    }
+
+    const { id: goldAccountId } = await context.params;
+    const { searchParams } = new URL(request.url);
+    const signalId = searchParams.get("signalId");
+    if (!signalId) {
+      return Response.json(
+        { error: "signalId is required" },
+        { status: 400 },
+      );
+    }
+
+    const db = getDb();
+    const [deleted] = await db
+      .delete(schema.buyingSignals)
+      .where(
+        and(
+          eq(schema.buyingSignals.id, signalId),
+          eq(schema.buyingSignals.goldAccountId, goldAccountId),
+        ),
+      )
+      .returning();
+
+    if (!deleted) {
+      return Response.json(
+        { error: "Buying signal not found" },
+        { status: 404 },
+      );
+    }
+
+    await recordAuditEvent({
+      actorType: "human",
+      actorUserId: founder.userId,
+      action: "gold_buying_signal_deleted",
+      entityType: "buying_signal",
+      entityId: signalId,
+      previousValue: { signalType: deleted.signalType, title: deleted.title },
+      outcome: "succeeded",
+    });
+
+    return Response.json({ ok: true });
   } catch (err) {
     return errorResponse(err);
   }

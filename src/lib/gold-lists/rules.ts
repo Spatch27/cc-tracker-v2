@@ -91,12 +91,86 @@ export function inferFolkInteractionChannel(
   return "other";
 }
 
+export function inferFolkInteractionDirection(
+  interaction: FolkInteraction,
+  founderEmails: readonly string[] = [],
+): ActivityDirection {
+  const extra = interaction as Record<string, unknown>;
+  const explicitDir =
+    typeof extra.direction === "string"
+      ? extra.direction.toLowerCase()
+      : "";
+  if (explicitDir.includes("out") || explicitDir.includes("sent")) {
+    return "outbound";
+  }
+  if (explicitDir.includes("in") || explicitDir.includes("receiv")) {
+    return "inbound";
+  }
+
+  const normalizedFounderEmails = new Set(
+    founderEmails.map((e) => e.trim().toLowerCase()).filter(Boolean),
+  );
+
+  const extractEmail = (val: unknown): string | null => {
+    if (typeof val === "string" && val.includes("@")) {
+      return val.trim().toLowerCase();
+    }
+    if (val && typeof val === "object") {
+      const rec = val as Record<string, unknown>;
+      if (typeof rec.email === "string" && rec.email.includes("@")) {
+        return rec.email.trim().toLowerCase();
+      }
+      if (typeof rec.address === "string" && rec.address.includes("@")) {
+        return rec.address.trim().toLowerCase();
+      }
+    }
+    return null;
+  };
+
+  const fromEmail =
+    extractEmail(extra.from) ??
+    extractEmail(extra.sender) ??
+    extractEmail(extra.fromEmail) ??
+    extractEmail(extra.senderEmail);
+
+  const channel = inferFolkInteractionChannel(interaction);
+  const isEmail =
+    (interaction.importedType ?? "").toLowerCase() === "email" ||
+    channel === "email";
+
+  if (fromEmail) {
+    if (normalizedFounderEmails.has(fromEmail)) {
+      return "outbound";
+    }
+    if (normalizedFounderEmails.size > 0 || isEmail) {
+      return "inbound";
+    }
+  }
+
+  const userEmail = interaction.user?.email?.trim().toLowerCase() ?? null;
+  if (isEmail && userEmail && normalizedFounderEmails.has(userEmail)) {
+    return "outbound";
+  }
+
+  const rawType = `${interaction.importedType ?? ""} ${interaction.activityType ?? ""}`.toLowerCase();
+  if (rawType.includes("outbound") || rawType.includes("sent")) {
+    return "outbound";
+  }
+  if (rawType.includes("inbound") || rawType.includes("received")) {
+    return "inbound";
+  }
+
+  return "note";
+}
+
 export function normalizeFolkInteraction(
   interaction: FolkInteraction,
   ctx: {
     goldAccountId: string;
     folkPersonLinkId: string;
     ownerUserId?: string | null;
+    founderEmails?: readonly string[];
+    direction?: ActivityDirection;
   },
 ) {
   const occurredAtRaw = interaction.datetime ?? interaction.createdAt;
@@ -105,6 +179,9 @@ export function normalizeFolkInteraction(
 
   const isEmail = (interaction.importedType ?? "").toLowerCase() === "email";
   const channel = inferFolkInteractionChannel(interaction);
+  const direction =
+    ctx.direction ??
+    inferFolkInteractionDirection(interaction, ctx.founderEmails ?? []);
   const visibilityRestricted = Boolean(interaction.privacyRestricted);
 
   const previewSource = visibilityRestricted
@@ -117,7 +194,7 @@ export function normalizeFolkInteraction(
     breakfastEventId: null,
     folkPersonLinkId: ctx.folkPersonLinkId,
     channel,
-    direction: "note" as ActivityDirection,
+    direction,
     ownerUserId: ctx.ownerUserId ?? null,
     actorAgentId: null,
     conversationKey:

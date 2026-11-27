@@ -59,7 +59,7 @@ export async function loadFullBreakfastWorkspace(
   const personIds = invitations.map((i) => i.folkPersonLinkId);
   const invitationIds = invitations.map((i) => i.id);
 
-  const [people, historyRows, feedbackRows, referralRows] = await Promise.all([
+  const [people, historyRows, feedbackRows, referralRows, eventMessages, eventActivities] = await Promise.all([
     personIds.length > 0
       ? db
           .select()
@@ -85,6 +85,16 @@ export async function loadFullBreakfastWorkspace(
       .from(schema.breakfastReferrals)
       .where(eq(schema.breakfastReferrals.eventId, eventId))
       .orderBy(desc(schema.breakfastReferrals.createdAt)),
+    db
+      .select()
+      .from(schema.messageApprovals)
+      .where(eq(schema.messageApprovals.breakfastEventId, eventId))
+      .orderBy(desc(schema.messageApprovals.createdAt)),
+    db
+      .select()
+      .from(schema.outreachActivities)
+      .where(eq(schema.outreachActivities.breakfastEventId, eventId))
+      .orderBy(desc(schema.outreachActivities.occurredAt)),
   ]);
 
   const companyIds = Array.from(
@@ -116,6 +126,43 @@ export async function loadFullBreakfastWorkspace(
       person?.folkCompanyLinkId
         ? companyMap.get(person.folkCompanyLinkId) ?? null
         : null;
+
+    const personMsgs = eventMessages.filter(
+      (m) => m.folkPersonLinkId === inv.folkPersonLinkId,
+    );
+    const personActs = eventActivities.filter(
+      (a) => a.folkPersonLinkId === inv.folkPersonLinkId,
+    );
+    const referralCount = referralRows.filter(
+      (r) => r.referredByFolkPersonLinkId === inv.folkPersonLinkId,
+    ).length;
+
+    let followUpStatus:
+      | "not_started"
+      | "drafted"
+      | "approved"
+      | "sent"
+      | "replied" = "not_started";
+    if (
+      personActs.some((a) => a.direction === "inbound") ||
+      referralCount > 0
+    ) {
+      followUpStatus = "replied";
+    } else if (
+      personMsgs.some((m) => m.status === "sent") ||
+      personActs.some((a) => a.direction === "outbound")
+    ) {
+      followUpStatus = "sent";
+    } else if (personMsgs.some((m) => m.status === "approved")) {
+      followUpStatus = "approved";
+    } else if (
+      personMsgs.some(
+        (m) => m.status === "draft" || m.status === "awaiting_approval",
+      )
+    ) {
+      followUpStatus = "drafted";
+    }
+
     return {
       ...inv,
       person: person
@@ -132,6 +179,11 @@ export async function loadFullBreakfastWorkspace(
           }
         : null,
       history: historyByInvitation.get(inv.id) ?? [],
+      postEventFollowUp: {
+        status: followUpStatus,
+        referralCount,
+        latestMessageId: personMsgs[0]?.id ?? null,
+      },
     };
   });
 

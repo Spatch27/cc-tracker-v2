@@ -5,6 +5,7 @@ import {
   deduplicateTimelineActivities,
   evaluateAccountFit,
   GoldListRuleError,
+  inferFolkInteractionDirection,
   MAX_GOLD_ACCOUNTS_PER_FOUNDER,
   normalizeFolkInteraction,
 } from "@/lib/gold-lists/rules";
@@ -177,5 +178,37 @@ describe("Gold-list domain rules & priority outreach acceptance scenario", () =>
     expect(flagged[0]?.status).toBe("needs_review");
     expect(flagged[0]?.flaggedByReplyActivityId).toBe("act_reply_1");
     expect(flagged[1]?.status).toBe("open");
+  });
+
+  it("infers outbound vs inbound direction and maps founder emails on Folk interactions", () => {
+    const founderEmails = ["tim@committedcitizens.co.uk", "ben@committedcitizens.co.uk"];
+
+    const outboundDir = inferFolkInteractionDirection(
+      {
+        id: "int_out_1",
+        importedType: "email",
+        user: { id: "fu_tim", email: "tim@committedcitizens.co.uk" },
+      },
+      founderEmails,
+    );
+    expect(outboundDir).toBe("outbound");
+
+    const inboundNorm = normalizeFolkInteraction(
+      {
+        id: "int_in_1",
+        importedType: "email",
+        from: "cmo@prospect.co.uk",
+        title: "Re: CMO Breakfast",
+        threadId: "thr_99",
+      },
+      {
+        goldAccountId: "gold_1",
+        folkPersonLinkId: "per_1",
+        founderEmails,
+      },
+    );
+    expect(inboundNorm.direction).toBe("inbound");
+    expect(inboundNorm.channel).toBe("email");
+    expect(inboundNorm.conversationKey).toBe("thr_99");
   });
 });

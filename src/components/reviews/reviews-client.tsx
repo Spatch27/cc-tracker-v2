@@ -109,6 +109,8 @@ export function ReviewsClient({
     initialLastReconcileRun,
   );
   const [tab, setTab] = useState<FilterTab>("pending_review");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [targetFilter, setTargetFilter] = useState<"all" | "folk" | "tracker">("all");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [reconciling, setReconciling] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -145,11 +147,27 @@ export function ReviewsClient({
     ).length,
   };
 
+  const qLower = searchQuery.trim().toLowerCase();
   const visibleProposals = proposals.filter((p) => {
-    if (tab === "history") {
-      return ["applied", "rejected", "failed"].includes(p.status);
-    }
-    return p.status === tab;
+    const matchesTab =
+      tab === "history"
+        ? ["applied", "rejected", "failed"].includes(p.status)
+        : p.status === tab;
+    if (!matchesTab) return false;
+    if (targetFilter !== "all" && p.targetSystem !== targetFilter) return false;
+    if (!qLower) return true;
+    const hay = [
+      p.summary,
+      p.entityType,
+      p.entityId,
+      p.folkRecordId,
+      p.sourceNote,
+      JSON.stringify(p.proposedChangesJson),
+    ]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
+    return hay.includes(qLower);
   });
 
   function updateProposalInList(updated: SerializedProposal) {
@@ -556,6 +574,31 @@ export function ReviewsClient({
         ))}
       </div>
 
+      <div className="flex flex-col sm:flex-row gap-2 text-xs">
+        <div className="relative flex-1">
+          <Search className="h-3.5 w-3.5 text-muted absolute left-3 top-2.5" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search proposals by name, company, field, or summary..."
+            className="w-full rounded-lg border border-border bg-surface-elevated pl-8 pr-3 py-1.5"
+          />
+        </div>
+        <select
+          aria-label="Filter by target system"
+          value={targetFilter}
+          onChange={(e) =>
+            setTargetFilter(e.target.value as "all" | "folk" | "tracker")
+          }
+          className="rounded-lg border border-border bg-surface-elevated px-3 py-1.5"
+        >
+          <option value="all">All Targets</option>
+          <option value="folk">Folk Updates &amp; New Contacts</option>
+          <option value="tracker">Tracker Updates &amp; Conflicts</option>
+        </select>
+      </div>
+
       {visibleProposals.length === 0 ? (
         <div className="rounded-xl border border-border bg-surface p-8 text-center text-sm text-muted">
           No items in this queue right now.
@@ -944,7 +987,8 @@ export function ReviewsClient({
 
                     {folkSearchLoading ? (
                       <p className="text-xs text-muted">
-                        Searching your Folk CRM contacts...
+                        Searching all Folk CRM records (this can take a few
+                        seconds)...
                       </p>
                     ) : folkSearchResults.length === 0 ? (
                       <p className="text-xs text-muted">

@@ -94,6 +94,25 @@ export async function POST(
         .returning();
 
       folkPersonLinkId = personLink.id;
+
+      const [existingMapped] = await db
+        .select({ id: schema.goldAccountContacts.id })
+        .from(schema.goldAccountContacts)
+        .where(
+          and(
+            eq(schema.goldAccountContacts.goldAccountId, goldAccountId),
+            eq(schema.goldAccountContacts.folkPersonLinkId, folkPersonLinkId),
+            eq(schema.goldAccountContacts.coverageStatus, "mapped"),
+          ),
+        )
+        .limit(1);
+
+      if (existingMapped) {
+        return Response.json(
+          { error: `${body.fullName} is already mapped to this Gold account.` },
+          { status: 409 },
+        );
+      }
     }
 
     const [created] = await db

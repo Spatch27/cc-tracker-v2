@@ -84,6 +84,7 @@ export default async function BreakfastDetailPage({
       specialRequests: inv.specialRequests,
       earlyDepartureNote: inv.earlyDepartureNote,
       person: inv.person,
+      postEventFollowUp: inv.postEventFollowUp,
       history: inv.history.map((h) => ({
         id: h.id,
         previousResponseStatus: h.previousResponseStatus,
