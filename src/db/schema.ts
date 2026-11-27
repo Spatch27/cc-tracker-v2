@@ -297,9 +297,92 @@ export const goldAccounts = pgTable("gold_accounts", {
   status: text("status").$type<"active" | "archived">().notNull().default("active"),
   marketingTeamSize: integer("marketing_team_size"),
   legacySetupNotes: text("legacy_setup_notes"),
+  fitNotes: text("fit_notes"),
   legacyScoreMetadataJson: jsonb("legacy_score_metadata_json").$type<Record<string, unknown>>(),
+  lastInteractionsSyncAt: timestamp("last_interactions_sync_at", { withTimezone: true }),
+  lastInteractionsSyncNote: text("last_interactions_sync_note"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const goldAccountContacts = pgTable("gold_account_contacts", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  goldAccountId: uuid("gold_account_id")
+    .notNull()
+    .references(() => goldAccounts.id, { onDelete: "cascade" }),
+  folkPersonLinkId: uuid("folk_person_link_id").references(
+    () => folkPeopleLink.id,
+  ),
+  roleCategory: text("role_category")
+    .$type<"cmo" | "vp_marketing" | "marketing_director" | "marketing_ops" | "other">()
+    .notNull(),
+  isPrimaryDecisionMaker: boolean("is_primary_decision_maker")
+    .notNull()
+    .default(false),
+  coverageStatus: text("coverage_status")
+    .$type<"mapped" | "gap" | "former">()
+    .notNull()
+    .default("mapped"),
+  notes: text("notes"),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const accountIntelligence = pgTable("account_intelligence", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  goldAccountId: uuid("gold_account_id")
+    .notNull()
+    .references(() => goldAccounts.id, { onDelete: "cascade" }),
+  dimension: text("dimension")
+    .$type<"team" | "process" | "data" | "tech">()
+    .notNull(),
+  summary: text("summary").notNull(),
+  factType: text("fact_type")
+    .$type<"verified" | "interpretation" | "unknown">()
+    .notNull()
+    .default("verified"),
+  evidenceDate: timestamp("evidence_date", { withTimezone: true }),
+  observedAt: timestamp("observed_at", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+  sourceUrl: text("source_url"),
+  sourceNote: text("source_note"),
+  recordedByUserId: uuid("recorded_by_user_id").references(() => users.id),
+  recordedByAgentId: uuid("recorded_by_agent_id").references(
+    () => agentIdentities.id,
+  ),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const buyingSignals = pgTable("buying_signals", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  goldAccountId: uuid("gold_account_id")
+    .notNull()
+    .references(() => goldAccounts.id, { onDelete: "cascade" }),
+  signalType: text("signal_type")
+    .$type<
+      | "leadership_change"
+      | "funding"
+      | "consolidation"
+      | "integration"
+      | "acquisition"
+      | "other"
+    >()
+    .notNull(),
+  title: text("title").notNull(),
+  details: text("details"),
+  factType: text("fact_type")
+    .$type<"verified" | "interpretation" | "unknown">()
+    .notNull()
+    .default("verified"),
+  signalDate: timestamp("signal_date", { withTimezone: true }),
+  observedAt: timestamp("observed_at", { withTimezone: true })
+    .defaultNow()
+    .notNull(),
+  sourceUrl: text("source_url"),
+  sourceNote: text("source_note"),
+  recordedByUserId: uuid("recorded_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
 export const outreachActivities = pgTable(

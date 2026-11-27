@@ -1,9 +1,14 @@
-import { asc, desc } from "drizzle-orm";
+import { asc, desc, eq } from "drizzle-orm";
 import { redirect } from "next/navigation";
-import { Clock3 } from "lucide-react";
+import {
+  ActionsWorkspaceClient,
+  type SerializedActionItem,
+  type SerializedAwaitingActivity,
+} from "@/components/actions/actions-workspace-client";
 import { AppShell } from "@/components/app-shell";
 import { getDb, isDatabaseConfigured, schema } from "@/db";
 import { getFounderAccessState } from "@/lib/auth";
+import { ensureAllowlistedFounders, type FounderOption } from "@/lib/founders";
 
 export const dynamic = "force-dynamic";
 
@@ -13,87 +18,107 @@ export default async function ActionsPage() {
   if (access.status === "forbidden") redirect("/access-denied");
   const founder = access.status === "authenticated" ? access.founder : null;
 
-  let actions: (typeof schema.followUpActions.$inferSelect)[] = [];
-  let activities: (typeof schema.outreachActivities.$inferSelect)[] = [];
+  let founders: FounderOption[] = [];
+  let actions: SerializedActionItem[] = [];
+  let awaitingReply: SerializedAwaitingActivity[] = [];
+
   if (isDatabaseConfigured()) {
     try {
       const db = getDb();
-      [actions, activities] = await Promise.all([
-        db
-          .select()
-          .from(schema.followUpActions)
-          .orderBy(asc(schema.followUpActions.dueDate))
-          .limit(50),
-        db
-          .select()
-          .from(schema.outreachActivities)
-          .orderBy(desc(schema.outreachActivities.occurredAt))
-          .limit(50),
-      ]);
+      founders = await ensureAllowlistedFounders(db);
+      const [rawActions, accounts, companies, people, outboundRows, inboundRows] =
+        await Promise.all([
+          db
+            .select()
+            .from(schema.followUpActions)
+            .orderBy(asc(schema.followUpActions.dueDate)),
+          db.select().from(schema.goldAccounts),
+          db.select().from(schema.folkCompaniesLink),
+          db.select().from(schema.folkPeopleLink),
+          db
+            .select()
+            .from(schema.outreachActivities)
+            .where(eq(schema.outreachActivities.direction, "outbound"))
+            .orderBy(desc(schema.outreachActivities.occurredAt))
+            .limit(50),
+          db
+            .select({
+              goldAccountId: schema.outreachActivities.goldAccountId,
+              folkPersonLinkId: schema.outreachActivities.folkPersonLinkId,
+              occurredAt: schema.outreachActivities.occurredAt,
+            })
+            .from(schema.outreachActivities)
+            .where(eq(schema.outreachActivities.direction, "inbound")),
+        ]);
+
+      const founderMap = new Map(founders.map((f) => [f.id, f]));
+      const companyMap = new Map(companies.map((c) => [c.id, c]));
+      const accountMap = new Map(accounts.map((a) => [a.id, a]));
+      const personMap = new Map(people.map((p) => [p.id, p]));
+
+      actions = rawActions.map((a) => {
+        const acc = a.goldAccountId ? accountMap.get(a.goldAccountId) : undefined;
+        const comp = acc ? companyMap.get(acc.folkCompanyLinkId) : undefined;
+        const p = a.folkPersonLinkId ? personMap.get(a.folkPersonLinkId) : undefined;
+        return {
+          id: a.id,
+          goldAccountId: a.goldAccountId,
+          companyName: comp?.name ?? null,
+          personName: p?.fullName ?? null,
+          ownerUserId: a.ownerUserId,
+          ownerName: founderMap.get(a.ownerUserId)?.name ?? "Unknown",
+          title: a.title,
+          dueDate: a.dueDate.toISOString(),
+          status: a.status,
+          snoozeHistoryJson: a.snoozeHistoryJson ?? [],
+        };
+      });
+
+      awaitingReply = outboundRows
+        .filter(
+          (out) =>
+            !inboundRows.some(
+              (inb) =>
+                inb.occurredAt > out.occurredAt &&
+                ((out.folkPersonLinkId &&
+                  inb.folkPersonLinkId === out.folkPersonLinkId) ||
+                  (out.goldAccountId && inb.goldAccountId === out.goldAccountId)),
+            ),
+        )
+        .map((act) => {
+          const acc = act.goldAccountId
+            ? accountMap.get(act.goldAccountId)
+            : undefined;
+          const comp = acc ? companyMap.get(acc.folkCompanyLinkId) : undefined;
+          const p = act.folkPersonLinkId
+            ? personMap.get(act.folkPersonLinkId)
+            : undefined;
+          return {
+            id: act.id,
+            goldAccountId: act.goldAccountId,
+            companyName: comp?.name ?? null,
+            personName: p?.fullName ?? null,
+            ownerName: act.ownerUserId
+              ? founderMap.get(act.ownerUserId)?.name ?? null
+              : null,
+            channel: act.channel,
+            subject: act.subject,
+            occurredAt: act.occurredAt.toISOString(),
+          };
+        });
     } catch {
       actions = [];
-      activities = [];
+      awaitingReply = [];
     }
   }
 
   return (
     <AppShell activePath="/actions" founder={founder}>
-      <div className="space-y-6">
-        <div className="flex items-center gap-2">
-          <Clock3 className="h-5 w-5 text-accent" />
-          <h1 className="text-2xl font-semibold tracking-tight">
-            Actions &amp; Outreach Timeline
-          </h1>
-        </div>
-
-        <section className="rounded-xl border border-border bg-surface p-5 space-y-3">
-          <h2 className="text-sm font-medium">Founder-Owned Next Actions</h2>
-          {actions.length === 0 ? (
-            <p className="text-sm text-muted">
-              No follow-up actions recorded yet.
-            </p>
-          ) : (
-            <ul className="space-y-2 text-sm">
-              {actions.map((a) => (
-                <li
-                  key={a.id}
-                  className="flex items-center justify-between border-b border-border/60 pb-2"
-                >
-                  <span>{a.title}</span>
-                  <span className="text-xs font-mono text-muted">
-                    {a.status} · due {a.dueDate.toISOString().slice(0, 10)}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-
-        <section className="rounded-xl border border-border bg-surface p-5 space-y-3">
-          <h2 className="text-sm font-medium">Shared Activity Timeline</h2>
-          {activities.length === 0 ? (
-            <p className="text-sm text-muted">
-              No outreach activities synced or logged yet.
-            </p>
-          ) : (
-            <ul className="space-y-2 text-sm">
-              {activities.map((act) => (
-                <li
-                  key={act.id}
-                  className="flex items-center justify-between border-b border-border/60 pb-2"
-                >
-                  <span>
-                    [{act.channel}] {act.subject ?? act.direction}
-                  </span>
-                  <span className="text-xs font-mono text-muted">
-                    {act.sourceSystem} · {act.executionStatus}
-                  </span>
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
-      </div>
+      <ActionsWorkspaceClient
+        initialActions={actions}
+        awaitingReplyActivities={awaitingReply}
+        founders={founders}
+      />
     </AppShell>
   );
 }
