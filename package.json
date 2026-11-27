@@ -1,0 +1,44 @@
+{
+  "name": "cc-opportunity-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "db:generate": "npx drizzle-kit generate",
+    "db:push": "node -e \"require('dotenv').config({ path: '.env.local' });\" && npx dotenv -e .env.local -- npx drizzle-kit push",
+    "folk:probe": "tsx scripts/folk-probe.ts"
+  },
+  "dependencies": {
+    "@clerk/nextjs": "^7.0.0",
+    "@neondatabase/serverless": "^1.0.0",
+    "clsx": "^2.1.1",
+    "dotenv": "^16.4.7",
+    "drizzle-orm": "^0.41.0",
+    "lucide-react": "^0.511.0",
+    "next": "^16.0.10",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tailwind-merge": "^3.2.0",
+    "zod": "^3.24.2"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.0",
+    "@types/node": "^22.13.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "dotenv-cli": "^8.0.0",
+    "drizzle-kit": "^0.30.6",
+    "eslint": "^9.22.0",
+    "eslint-config-next": "^16.0.10",
+    "tailwindcss": "^4.1.0",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "vitest": "^3.0.9"
+  }
+}
