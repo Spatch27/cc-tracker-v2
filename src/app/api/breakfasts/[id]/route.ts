@@ -156,3 +156,66 @@ export async function PATCH(
     return errorResponse(err);
   }
 }
+
+export async function DELETE(
+  _request: Request,
+  context: { params: Promise<{ id: string }> },
+) {
+  try {
+    const founder = await requireFounderSession();
+    if (!isDatabaseConfigured()) {
+      return Response.json(
+        { error: "Database is not configured" },
+        { status: 503 },
+      );
+    }
+
+    const { id } = await context.params;
+    const db = getDb();
+
+    const [existing] = await db
+      .select()
+      .from(schema.breakfastEvents)
+      .where(eq(schema.breakfastEvents.id, id))
+      .limit(1);
+
+    if (!existing) {
+      return Response.json({ error: "Breakfast event not found" }, { status: 404 });
+    }
+
+    await db
+      .update(schema.breakfastInvitations)
+      .set({ carriedForwardFromEventId: null })
+      .where(eq(schema.breakfastInvitations.carriedForwardFromEventId, id));
+    await db
+      .update(schema.followUpActions)
+      .set({ breakfastEventId: null })
+      .where(eq(schema.followUpActions.breakfastEventId, id));
+    await db
+      .update(schema.messageApprovals)
+      .set({ breakfastEventId: null })
+      .where(eq(schema.messageApprovals.breakfastEventId, id));
+    await db
+      .update(schema.outreachActivities)
+      .set({ breakfastEventId: null })
+      .where(eq(schema.outreachActivities.breakfastEventId, id));
+
+    await db
+      .delete(schema.breakfastEvents)
+      .where(eq(schema.breakfastEvents.id, id));
+
+    await recordAuditEvent({
+      actorType: "human",
+      actorUserId: founder.userId,
+      action: "breakfast_event_deleted",
+      entityType: "breakfast_event",
+      entityId: id,
+      previousValue: { locale: existing.locale, title: existing.title },
+      outcome: "succeeded",
+    });
+
+    return Response.json({ ok: true, deletedId: id });
+  } catch (err) {
+    return errorResponse(err);
+  }
+}

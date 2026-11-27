@@ -139,3 +139,62 @@ export async function PATCH(
     return errorResponse(err);
   }
 }
+
+export async function DELETE(
+  _request: Request,
+  context: { params: Promise<{ id: string }> },
+) {
+  try {
+    const founder = await requireFounderSession();
+    if (!isDatabaseConfigured()) {
+      return Response.json(
+        { error: "Database is not configured" },
+        { status: 503 },
+      );
+    }
+
+    const { id } = await context.params;
+    const db = getDb();
+
+    const [existing] = await db
+      .select()
+      .from(schema.goldAccounts)
+      .where(eq(schema.goldAccounts.id, id))
+      .limit(1);
+
+    if (!existing) {
+      return Response.json({ error: "Gold account not found" }, { status: 404 });
+    }
+
+    await db
+      .delete(schema.followUpActions)
+      .where(eq(schema.followUpActions.goldAccountId, id));
+    await db
+      .update(schema.messageApprovals)
+      .set({ goldAccountId: null })
+      .where(eq(schema.messageApprovals.goldAccountId, id));
+    await db
+      .delete(schema.outreachActivities)
+      .where(eq(schema.outreachActivities.goldAccountId, id));
+
+    await db.delete(schema.goldAccounts).where(eq(schema.goldAccounts.id, id));
+
+    await recordAuditEvent({
+      actorType: "human",
+      actorUserId: founder.userId,
+      action: "gold_account_deleted",
+      entityType: "gold_account",
+      entityId: id,
+      previousValue: {
+        folkCompanyLinkId: existing.folkCompanyLinkId,
+        ownerUserId: existing.ownerUserId,
+        status: existing.status,
+      },
+      outcome: "succeeded",
+    });
+
+    return Response.json({ ok: true, deletedId: id });
+  } catch (err) {
+    return errorResponse(err);
+  }
+}

@@ -510,6 +510,43 @@ export function GoldAccountWorkspaceClient({
           >
             {ws.account.status === "active" ? "Archive" : "Restore"}
           </button>
+
+          <button
+            type="button"
+            disabled={busy}
+            onClick={async () => {
+              const name = ws.company?.name ?? "this Gold account";
+              if (
+                !window.confirm(
+                  `Permanently delete ${name} from Gold Lists? Your Folk CRM company and contacts will not be affected.`,
+                )
+              ) {
+                return;
+              }
+              setBusy(true);
+              try {
+                const res = await fetch(`/api/gold-lists/${ws.account.id}`, {
+                  method: "DELETE",
+                });
+                if (!res.ok) {
+                  const data = await res.json();
+                  setBanner({
+                    kind: "error",
+                    text: data.error ?? "Failed to delete Gold account",
+                  });
+                  return;
+                }
+                router.push("/gold-lists");
+                router.refresh();
+              } finally {
+                setBusy(false);
+              }
+            }}
+            className="inline-flex items-center gap-1 rounded-lg border border-danger/40 bg-danger/10 px-3 py-1.5 text-danger hover:bg-danger/20"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            Delete
+          </button>
         </div>
       </div>
 
