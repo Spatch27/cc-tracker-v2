@@ -11,6 +11,7 @@ import {
   Sparkles,
 } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
+import { SetupActionsPanel } from "@/components/setup-actions-panel";
 import { getFounderAccessState } from "@/lib/auth";
 import { getOverviewSummary } from "@/lib/dashboard";
 import { getIntegrationStatus } from "@/lib/env";
@@ -171,12 +172,19 @@ export default async function OverviewPage() {
 
           {summary.dbError && (
             <div className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
-              Database connected status: {summary.dbError}. Run{" "}
-              <code className="font-mono">npm run db:push</code> after setting{" "}
-              <code className="font-mono">DATABASE_URL</code> in{" "}
-              <code className="font-mono">.env.local</code>.
+              Database status: {summary.dbError}. Click{" "}
+              <strong className="font-semibold">
+                Initialize Database Tables
+              </strong>{" "}
+              below to create the Neon Postgres schema.
             </div>
           )}
+
+          <SetupActionsPanel
+            dbReady={summary.dbReady}
+            databaseConfigured={envStatus.databaseConfigured}
+            folkConfigured={envStatus.folkConfigured}
+          />
 
           <div className="rounded-lg border border-border bg-surface-elevated p-4 text-xs text-muted space-y-1.5">
             <div className="flex items-center gap-1.5 text-foreground font-medium">
@@ -196,11 +204,11 @@ export default async function OverviewPage() {
               </p>
             ) : (
               <p>
-                No Folk sync run recorded yet. Run{" "}
-                <code className="font-mono text-foreground">
-                  npm run folk:probe
-                </code>{" "}
-                first to verify read-only access and email visibility across
+                No Folk sync run recorded yet. Click{" "}
+                <strong className="text-foreground">
+                  Run Read-Only Folk API Probe
+                </strong>{" "}
+                above to verify read-only access and email visibility across
                 both founders.
               </p>
             )}

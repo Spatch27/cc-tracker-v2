@@ -6,8 +6,10 @@ import {
   type AgentListItem,
 } from "@/components/admin-agents-panel";
 import { AppShell } from "@/components/app-shell";
+import { SetupActionsPanel } from "@/components/setup-actions-panel";
 import { getDb, isDatabaseConfigured, schema } from "@/db";
 import { getFounderAccessState } from "@/lib/auth";
+import { getIntegrationStatus } from "@/lib/env";
 
 export const dynamic = "force-dynamic";
 
@@ -16,6 +18,7 @@ export default async function AdminPage() {
   if (access.status === "unauthenticated") redirect("/sign-in");
   if (access.status === "forbidden") redirect("/access-denied");
   const founder = access.status === "authenticated" ? access.founder : null;
+  const envStatus = getIntegrationStatus();
 
   let agents: AgentListItem[] = [];
   let dbReady = false;
@@ -62,6 +65,17 @@ export default async function AdminPage() {
               Scoped revocable agent tokens and integration health.
             </p>
           </div>
+        </div>
+
+        <div className="rounded-xl border border-border bg-surface p-5 space-y-3">
+          <h2 className="text-sm font-medium">
+            Database Setup &amp; Phase 0 Folk Diagnostics
+          </h2>
+          <SetupActionsPanel
+            dbReady={dbReady}
+            databaseConfigured={envStatus.databaseConfigured}
+            folkConfigured={envStatus.folkConfigured}
+          />
         </div>
 
         <AdminAgentsPanel initialAgents={agents} dbReady={dbReady} />
