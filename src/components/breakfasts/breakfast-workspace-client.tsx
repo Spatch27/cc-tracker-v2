@@ -13,9 +13,11 @@ import {
   Copy,
   CreditCard,
   History,
+  Link2,
   MailPlus,
   MapPin,
   Pencil,
+  RefreshCw,
   Search,
   Sparkles,
   Trash2,
@@ -278,7 +280,7 @@ export function BreakfastWorkspaceClient({
   // Manual carry-forward modal
   const [showCarryModal, setShowCarryModal] = useState(false);
 
-  // Expanded invitee drawer
+  // Expanded invitee drawer & relink Folk contact picker
   const [expandedInvId, setExpandedInvId] = useState<string | null>(null);
   const [noteEdits, setNoteEdits] = useState<
     Record<
@@ -286,6 +288,10 @@ export function BreakfastWorkspaceClient({
       { dietaryNotes: string; specialRequests: string; earlyDepartureNote: string }
     >
   >({});
+  const [relinkingInvId, setRelinkingInvId] = useState<string | null>(null);
+  const [relinkQuery, setRelinkQuery] = useState("");
+  const [relinkResults, setRelinkResults] = useState<FolkSearchPerson[]>([]);
+  const [relinkLoading, setRelinkLoading] = useState(false);
 
   // Logistics form state
   const [venueName, setVenueName] = useState(ws.event.venueName ?? "");
@@ -545,6 +551,53 @@ export function BreakfastWorkspaceClient({
     } finally {
       setBusy(false);
     }
+  }
+
+  async function searchRelinkFolk(queryText: string) {
+    setRelinkLoading(true);
+    setBanner(null);
+    try {
+      const res = await fetch(
+        `/api/folk/people?q=${encodeURIComponent(queryText.trim())}`,
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setBanner({ kind: "error", text: data.error ?? "Failed to search Folk CRM" });
+        return;
+      }
+      setRelinkResults(data.people ?? []);
+    } catch {
+      setBanner({ kind: "error", text: "Network error searching Folk CRM" });
+    } finally {
+      setRelinkLoading(false);
+    }
+  }
+
+  async function openRelinkPicker(inv: SerializedInvitee) {
+    setExpandedInvId(inv.id);
+    if (relinkingInvId === inv.id) {
+      setRelinkingInvId(null);
+      return;
+    }
+    const rawName = inv.person?.fullName?.trim() ?? "";
+    const tokens = rawName.split(/\s+/).filter(Boolean);
+    const defaultQ = tokens.length >= 2 ? tokens[tokens.length - 1] : rawName;
+    setRelinkingInvId(inv.id);
+    setRelinkQuery(defaultQ);
+    setRelinkResults([]);
+    await searchRelinkFolk(defaultQ);
+  }
+
+  async function applyRelinkFolk(
+    inv: SerializedInvitee,
+    picked: FolkSearchPerson,
+  ) {
+    await patchInvitee(inv.id, { relinkFolkPerson: picked });
+    setRelinkingInvId(null);
+    setBanner({
+      kind: "info",
+      text: `Updated Folk link to ${picked.fullName}${picked.email ? ` (${picked.email})` : ""}.`,
+    });
   }
 
   async function draftApprovalMessage(inv: SerializedInvitee) {
@@ -1066,7 +1119,20 @@ export function BreakfastWorkspaceClient({
                               )}
                             </div>
                             <p className="text-[11px] text-muted mt-0.5 truncate max-w-[230px]">
-                              {inv.person?.email || "No email in Folk"}
+                              {inv.person?.email ? (
+                                inv.person.email
+                              ) : (
+                                <>
+                                  No email in Folk ·{" "}
+                                  <button
+                                    type="button"
+                                    onClick={() => openRelinkPicker(inv)}
+                                    className="text-accent hover:underline"
+                                  >
+                                    Fix Folk link
+                                  </button>
+                                </>
+                              )}
                             </p>
                           </td>
 
@@ -1299,6 +1365,26 @@ export function BreakfastWorkspaceClient({
                                     <MailPlus className="h-3.5 w-3.5 text-accent" />
                                     Queue Message Draft for Approval
                                   </button>
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() =>
+                                      patchInvitee(inv.id, { syncFromFolk: true })
+                                    }
+                                    className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs hover:border-accent/50"
+                                  >
+                                    <RefreshCw className="h-3.5 w-3.5 text-accent" />
+                                    Refresh from Folk
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() => openRelinkPicker(inv)}
+                                    className="inline-flex items-center gap-1.5 rounded-lg border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs font-medium text-accent hover:bg-accent/20"
+                                  >
+                                    <Link2 className="h-3.5 w-3.5" />
+                                    Change Linked Folk Record
+                                  </button>
                                 </div>
 
                                 <div className="flex flex-wrap gap-2">
@@ -1328,6 +1414,99 @@ export function BreakfastWorkspaceClient({
                                   </button>
                                 </div>
                               </div>
+
+                              {relinkingInvId === inv.id && (
+                                <div className="rounded-lg border border-accent/40 bg-surface p-3.5 space-y-3">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <p className="text-xs font-semibold text-foreground">
+                                      Pick the Right Folk CRM Record for{" "}
+                                      {inv.person?.fullName}
+                                    </p>
+                                    <button
+                                      type="button"
+                                      onClick={() => setRelinkingInvId(null)}
+                                      className="text-muted hover:text-foreground"
+                                    >
+                                      <X className="h-3.5 w-3.5" />
+                                    </button>
+                                  </div>
+
+                                  <div className="flex gap-2">
+                                    <input
+                                      type="text"
+                                      value={relinkQuery}
+                                      onChange={(e) =>
+                                        setRelinkQuery(e.target.value)
+                                      }
+                                      onKeyDown={(e) => {
+                                        if (e.key === "Enter") {
+                                          e.preventDefault();
+                                          void searchRelinkFolk(relinkQuery);
+                                        }
+                                      }}
+                                      placeholder="Search Folk by name, email, or company..."
+                                      className="flex-1 rounded-lg border border-border bg-surface-elevated px-3 py-1.5 text-xs text-foreground"
+                                    />
+                                    <button
+                                      type="button"
+                                      disabled={relinkLoading}
+                                      onClick={() =>
+                                        searchRelinkFolk(relinkQuery)
+                                      }
+                                      className="inline-flex items-center gap-1 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-accent-foreground disabled:opacity-40"
+                                    >
+                                      <Search className="h-3 w-3" />
+                                      {relinkLoading ? "Searching..." : "Search"}
+                                    </button>
+                                  </div>
+
+                                  {relinkLoading ? (
+                                    <p className="text-xs text-muted">
+                                      Searching Folk CRM...
+                                    </p>
+                                  ) : relinkResults.length === 0 ? (
+                                    <p className="text-xs text-muted">
+                                      No Folk contacts matched &ldquo;
+                                      {relinkQuery}&rdquo;. Try searching by
+                                      surname or company name.
+                                    </p>
+                                  ) : (
+                                    <div className="max-h-56 overflow-y-auto divide-y divide-border rounded-lg border border-border">
+                                      {relinkResults.map((person) => (
+                                        <div
+                                          key={person.folkPersonId}
+                                          className="flex items-center justify-between gap-3 px-3 py-2 text-xs bg-surface-elevated/40"
+                                        >
+                                          <div className="min-w-0">
+                                            <p className="font-medium text-foreground truncate">
+                                              {person.fullName}
+                                              {person.companyName
+                                                ? ` — ${person.companyName}`
+                                                : ""}
+                                            </p>
+                                            <p className="text-[11px] text-muted truncate">
+                                              {[person.jobTitle, person.email]
+                                                .filter(Boolean)
+                                                .join(" · ") ||
+                                                person.folkPersonId}
+                                            </p>
+                                          </div>
+                                          <button
+                                            type="button"
+                                            disabled={busy}
+                                            onClick={() =>
+                                              applyRelinkFolk(inv, person)
+                                            }
+                                            className="shrink-0 rounded-md border border-accent/40 bg-accent/15 px-2.5 py-1 text-[11px] font-medium text-accent hover:bg-accent/25"
+                                          >
+                                            Use This Folk Record
+                                          </button>
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              )}
 
                               {inv.history.length > 0 && (
                                 <div className="space-y-1.5 text-[11px] text-muted">

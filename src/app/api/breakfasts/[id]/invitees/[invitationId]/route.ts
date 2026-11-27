@@ -12,9 +12,20 @@ import {
   evaluateManualWaitlistOffer,
   normalizeLocale,
 } from "@/lib/breakfasts/rules";
+import { createFolkClientFromEnv } from "@/lib/folk/client";
 import { recordAuditEvent } from "@/lib/governance/audit";
 
 export const dynamic = "force-dynamic";
+
+const relinkFolkPersonSchema = z.object({
+  folkPersonId: z.string().min(1),
+  fullName: z.string().min(1),
+  email: z.string().nullable().optional(),
+  jobTitle: z.string().nullable().optional(),
+  folkCompanyId: z.string().nullable().optional(),
+  companyName: z.string().nullable().optional(),
+  linkedinUrl: z.string().nullable().optional(),
+});
 
 const patchInviteeSchema = z.object({
   responseStatus: z
@@ -33,6 +44,8 @@ const patchInviteeSchema = z.object({
   contactSuppressed: z.boolean().optional(),
   suppressionReason: z.string().max(300).nullable().optional(),
   note: z.string().max(500).optional(),
+  syncFromFolk: z.boolean().optional(),
+  relinkFolkPerson: relinkFolkPersonSchema.optional(),
 });
 
 export async function PATCH(
@@ -72,6 +85,198 @@ export async function PATCH(
 
     if (!person) {
       return Response.json({ error: "Linked person not found" }, { status: 404 });
+    }
+
+    if (body.syncFromFolk) {
+      const folkClient = createFolkClientFromEnv();
+      if (!folkClient) {
+        return Response.json(
+          { error: "FOLK_API_KEY is not configured" },
+          { status: 503 },
+        );
+      }
+
+      const live = await folkClient.getPerson(person.folkPersonId);
+      const liveFullName =
+        live.fullName?.trim() ||
+        [live.firstName, live.lastName].filter(Boolean).join(" ").trim() ||
+        person.fullName;
+      const liveEmail = live.emails?.[0]?.trim() || null;
+      const liveJobTitle = live.jobTitle?.trim() || null;
+      const liveLinkedin =
+        live.urls?.find((u) => u.toLowerCase().includes("linkedin.com")) ?? null;
+      const liveCompany = live.companies?.[0];
+
+      let folkCompanyLinkId = person.folkCompanyLinkId;
+      if (liveCompany?.id && liveCompany?.name) {
+        const [companyRow] = await db
+          .insert(schema.folkCompaniesLink)
+          .values({
+            folkCompanyId: liveCompany.id,
+            name: liveCompany.name,
+            lastSyncedAt: new Date(),
+            syncStatus: "linked",
+          })
+          .onConflictDoUpdate({
+            target: schema.folkCompaniesLink.folkCompanyId,
+            set: {
+              name: liveCompany.name,
+              lastSyncedAt: new Date(),
+              updatedAt: new Date(),
+            },
+          })
+          .returning({ id: schema.folkCompaniesLink.id });
+        folkCompanyLinkId = companyRow?.id ?? folkCompanyLinkId;
+      }
+
+      await db
+        .update(schema.folkPeopleLink)
+        .set({
+          fullName: liveFullName,
+          email: liveEmail,
+          jobTitle: liveJobTitle,
+          linkedinUrl: liveLinkedin,
+          folkCompanyLinkId,
+          lastSyncedAt: new Date(),
+          syncStatus: "linked",
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.folkPeopleLink.id, person.id));
+
+      await recordAuditEvent({
+        actorType: "human",
+        actorUserId: founder.userId,
+        action: "breakfast_invitee_synced_from_folk",
+        entityType: "folk_person_link",
+        entityId: person.id,
+        newValue: {
+          folkPersonId: person.folkPersonId,
+          fullName: liveFullName,
+          email: liveEmail,
+          jobTitle: liveJobTitle,
+        },
+        outcome: "succeeded",
+      });
+
+      return Response.json({
+        invitation: existing,
+        syncedFromFolk: true,
+      });
+    }
+
+    if (body.relinkFolkPerson) {
+      const picked = body.relinkFolkPerson;
+      let folkCompanyLinkId: string | null = null;
+      if (picked.folkCompanyId && picked.companyName) {
+        const [companyRow] = await db
+          .insert(schema.folkCompaniesLink)
+          .values({
+            folkCompanyId: picked.folkCompanyId,
+            name: picked.companyName,
+            lastSyncedAt: new Date(),
+            syncStatus: "linked",
+          })
+          .onConflictDoUpdate({
+            target: schema.folkCompaniesLink.folkCompanyId,
+            set: {
+              name: picked.companyName,
+              lastSyncedAt: new Date(),
+              updatedAt: new Date(),
+            },
+          })
+          .returning({ id: schema.folkCompaniesLink.id });
+        folkCompanyLinkId = companyRow?.id ?? null;
+      }
+
+      const [newPerson] = await db
+        .insert(schema.folkPeopleLink)
+        .values({
+          folkPersonId: picked.folkPersonId,
+          folkCompanyLinkId,
+          fullName: picked.fullName,
+          email: picked.email ?? null,
+          jobTitle: picked.jobTitle ?? null,
+          linkedinUrl: picked.linkedinUrl ?? null,
+          lastSyncedAt: new Date(),
+          syncStatus: "linked",
+        })
+        .onConflictDoUpdate({
+          target: schema.folkPeopleLink.folkPersonId,
+          set: {
+            ...(folkCompanyLinkId ? { folkCompanyLinkId } : {}),
+            fullName: picked.fullName,
+            email: picked.email ?? null,
+            jobTitle: picked.jobTitle ?? null,
+            linkedinUrl: picked.linkedinUrl ?? null,
+            lastSyncedAt: new Date(),
+            updatedAt: new Date(),
+          },
+        })
+        .returning();
+
+      if (newPerson.contactSuppressed) {
+        return Response.json(
+          {
+            error: `${newPerson.fullName} is marked Do Not Contact and cannot be linked to this invite list.`,
+          },
+          { status: 409 },
+        );
+      }
+
+      const duplicate = invitations.find(
+        (i) => i.id !== invitationId && i.folkPersonLinkId === newPerson.id,
+      );
+      if (duplicate) {
+        return Response.json(
+          {
+            error: `${newPerson.fullName} is already on this breakfast list. Remove the duplicate stub row or keep the existing entry.`,
+          },
+          { status: 409 },
+        );
+      }
+
+      const [relinked] = await db
+        .update(schema.breakfastInvitations)
+        .set({
+          folkPersonLinkId: newPerson.id,
+          updatedAt: new Date(),
+        })
+        .where(eq(schema.breakfastInvitations.id, invitationId))
+        .returning();
+
+      await db.insert(schema.breakfastInvitationHistory).values({
+        invitationId,
+        changedByUserId: founder.userId,
+        previousResponseStatus: existing.responseStatus,
+        newResponseStatus: existing.responseStatus,
+        previousAttendanceOutcome: existing.attendanceOutcome,
+        newAttendanceOutcome: existing.attendanceOutcome,
+        previousWaitlistStatus: existing.waitlistStatus,
+        newWaitlistStatus: existing.waitlistStatus,
+        note: `Changed linked Folk record from ${person.fullName} to ${newPerson.fullName} (${picked.folkPersonId})`,
+      });
+
+      await recordAuditEvent({
+        actorType: "human",
+        actorUserId: founder.userId,
+        action: "breakfast_invitee_relinked_folk",
+        entityType: "breakfast_invitation",
+        entityId: invitationId,
+        previousValue: {
+          folkPersonLinkId: person.id,
+          folkPersonId: person.folkPersonId,
+        },
+        newValue: {
+          folkPersonLinkId: newPerson.id,
+          folkPersonId: picked.folkPersonId,
+        },
+        outcome: "succeeded",
+      });
+
+      return Response.json({
+        invitation: relinked,
+        relinkedFolk: true,
+      });
     }
 
     if (body.contactSuppressed !== undefined) {
