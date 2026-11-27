@@ -1,9 +1,14 @@
-import { desc } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 import { redirect } from "next/navigation";
-import { ClipboardCheck } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
+import {
+  ReviewsClient,
+  type SerializedProposal,
+  type SerializedSyncRun,
+} from "@/components/reviews/reviews-client";
 import { getDb, isDatabaseConfigured, schema } from "@/db";
 import { getFounderAccessState } from "@/lib/auth";
+import { getIntegrationStatus } from "@/lib/env";
 
 export const dynamic = "force-dynamic";
 
@@ -12,62 +17,61 @@ export default async function ReviewsPage() {
   if (access.status === "unauthenticated") redirect("/sign-in");
   if (access.status === "forbidden") redirect("/access-denied");
   const founder = access.status === "authenticated" ? access.founder : null;
+  const envStatus = getIntegrationStatus();
 
-  let proposals: (typeof schema.changeProposals.$inferSelect)[] = [];
+  let proposals: SerializedProposal[] = [];
+  let lastReconcileRun: SerializedSyncRun | null = null;
+  let dbReady = false;
+
   if (isDatabaseConfigured()) {
     try {
       const db = getDb();
-      proposals = await db
-        .select()
-        .from(schema.changeProposals)
-        .orderBy(desc(schema.changeProposals.createdAt))
-        .limit(50);
+      const [proposalRows, [reconcileRow]] = await Promise.all([
+        db
+          .select()
+          .from(schema.changeProposals)
+          .orderBy(desc(schema.changeProposals.createdAt))
+          .limit(100),
+        db
+          .select()
+          .from(schema.syncRuns)
+          .where(and(eq(schema.syncRuns.source, "folk_reconcile")))
+          .orderBy(desc(schema.syncRuns.startedAt))
+          .limit(1),
+      ]);
+      dbReady = true;
+      proposals = proposalRows.map((p) => ({
+        ...p,
+        evidenceDate: p.evidenceDate ? p.evidenceDate.toISOString() : null,
+        observedAt: p.observedAt.toISOString(),
+        reviewedAt: p.reviewedAt ? p.reviewedAt.toISOString() : null,
+        appliedAt: p.appliedAt ? p.appliedAt.toISOString() : null,
+        createdAt: p.createdAt.toISOString(),
+        updatedAt: p.updatedAt.toISOString(),
+      }));
+      if (reconcileRow) {
+        lastReconcileRun = {
+          ...reconcileRow,
+          startedAt: reconcileRow.startedAt.toISOString(),
+          finishedAt: reconcileRow.finishedAt
+            ? reconcileRow.finishedAt.toISOString()
+            : null,
+        };
+      }
     } catch {
       proposals = [];
+      lastReconcileRun = null;
     }
   }
 
   return (
     <AppShell activePath="/reviews" founder={founder}>
-      <div className="space-y-4">
-        <div className="flex items-center gap-2">
-          <ClipboardCheck className="h-5 w-5 text-accent" />
-          <h1 className="text-2xl font-semibold tracking-tight">
-            Review Queue &amp; Folk Conflicts
-          </h1>
-        </div>
-
-        {proposals.length === 0 ? (
-          <div className="rounded-xl border border-border bg-surface p-6 text-sm text-muted">
-            No pending research proposals or Folk conflicts right now. Research
-            submitted via <code className="font-mono text-foreground">/api/proposals</code>{" "}
-            always enters <code className="font-mono text-foreground">pending_review</code>{" "}
-            before any Folk write can occur.
-          </div>
-        ) : (
-          <div className="space-y-3">
-            {proposals.map((p) => (
-              <div
-                key={p.id}
-                className="rounded-xl border border-border bg-surface p-4 space-y-2"
-              >
-                <div className="flex items-center justify-between">
-                  <span className="text-sm font-medium text-foreground">
-                    {p.summary}
-                  </span>
-                  <span className="rounded-full border border-border bg-surface-elevated px-2.5 py-0.5 text-xs font-mono">
-                    {p.status}
-                  </span>
-                </div>
-                <p className="text-xs text-muted">
-                  Target: {p.targetSystem} · {p.entityType} ({p.entityId}) ·
-                  Evidence: {p.factType}
-                </p>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
+      <ReviewsClient
+        initialProposals={proposals}
+        initialLastReconcileRun={lastReconcileRun}
+        dbReady={dbReady}
+        folkConfigured={envStatus.folkConfigured}
+      />
     </AppShell>
   );
 }

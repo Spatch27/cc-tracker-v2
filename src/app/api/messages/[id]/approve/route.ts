@@ -55,7 +55,9 @@ export async function POST(
         outcome: "succeeded",
       });
 
-      return Response.json({ message });
+      const { approvalTokenHash: _omitted, ...safeRejected } = message;
+      void _omitted;
+      return Response.json({ message: safeRejected });
     }
 
     const result = await service.approveMessage({
@@ -74,7 +76,12 @@ export async function POST(
       outcome: "succeeded",
     });
 
-    return Response.json(result);
+    const { approvalTokenHash: _omitted, ...safeApproved } = result.message;
+    void _omitted;
+    return Response.json({
+      message: safeApproved,
+      approvalToken: result.approvalToken,
+    });
   } catch (err) {
     if (
       err instanceof ApprovalRequiredError ||

@@ -61,6 +61,18 @@ function createFakeFolkClient(person: FolkPerson): FolkClientInterface {
     listNotes: vi.fn(),
     listInteractions: vi.fn(),
     getInteraction: vi.fn(),
+    createPerson: vi.fn(async (input) => ({
+      id: "per_created_999",
+      firstName: input.firstName ?? null,
+      lastName: input.lastName ?? null,
+      fullName: input.fullName ?? "Created Person",
+      emails: input.emails ?? [],
+      phones: [],
+      jobTitle: input.jobTitle ?? null,
+      urls: input.urls ?? [],
+      companies: [],
+      groups: [],
+    })),
     updatePerson: vi.fn(async (_id, patch) => {
       currentPerson = { ...currentPerson, ...patch };
       return currentPerson;
@@ -232,5 +244,105 @@ describe("proposal governance (Phase 1 exit check)", () => {
     });
     expect(retry.outcome).toBe("already_applied");
     expect(folkClient.updatePerson).toHaveBeenCalledTimes(1);
+  });
+
+  it("gates create_person proposals until founder approval and creates Folk contact with read-back", async () => {
+    const store = createInMemoryProposalStore();
+    const service = new ProposalGovernanceService(store);
+    const folkClient = createFakeFolkClient(basePerson);
+
+    const proposal = await service.createProposal({
+      targetSystem: "folk",
+      entityType: "person",
+      entityId: "new:bristol-invitee-1",
+      folkRecordId: null,
+      proposedByAgentId: "agent_1",
+      summary: "Create Folk person: Alex Candidate",
+      proposedChangesJson: {
+        _operation: "create_person",
+        _targetBreakfastEventId: "evt_bristol",
+        fullName: "Alex Candidate",
+        jobTitle: "CMO",
+        emails: ["alex@example.com"],
+      },
+      baseSnapshotJson: {},
+    });
+
+    await expect(
+      service.applyApprovedProposal({
+        proposalId: proposal.id,
+        folkClient,
+      }),
+    ).rejects.toBeInstanceOf(ApprovalRequiredError);
+    expect(folkClient.createPerson).not.toHaveBeenCalled();
+
+    await service.approveProposal({
+      proposalId: proposal.id,
+      approverUserId: "founder_tim",
+      actorType: "human",
+    });
+
+    const applied = await service.applyApprovedProposal({
+      proposalId: proposal.id,
+      folkClient,
+      idempotencyKey: "create-1",
+    });
+    expect(applied.outcome).toBe("applied");
+    expect(applied.createdFolkId).toBe("per_created_999");
+    expect(applied.proposal.folkRecordId).toBe("per_created_999");
+    expect(folkClient.createPerson).toHaveBeenCalledTimes(1);
+    expect(folkClient.createPerson).toHaveBeenCalledWith({
+      fullName: "Alex Candidate",
+      jobTitle: "CMO",
+      emails: ["alex@example.com"],
+    });
+    expect(folkClient.getPerson).toHaveBeenCalledWith("per_created_999");
+  });
+
+  it("resolves a conflicted Folk proposal using refreshed snapshot and applies cleanly", async () => {
+    const store = createInMemoryProposalStore();
+    const service = new ProposalGovernanceService(store);
+    const driftedPerson: FolkPerson = {
+      ...basePerson,
+      jobTitle: "SVP Marketing",
+    };
+    const folkClient = createFakeFolkClient(driftedPerson);
+
+    const proposal = await service.createProposal({
+      targetSystem: "folk",
+      entityType: "person",
+      entityId: "per_123",
+      folkRecordId: "per_123",
+      summary: "Update title",
+      proposedChangesJson: { jobTitle: "Chief Marketing Officer" },
+      baseSnapshotJson: { jobTitle: "Head of Marketing" },
+    });
+
+    await service.approveProposal({
+      proposalId: proposal.id,
+      approverUserId: "founder_tim",
+      actorType: "human",
+    });
+    const firstTry = await service.applyApprovedProposal({
+      proposalId: proposal.id,
+      folkClient,
+    });
+    expect(firstTry.outcome).toBe("conflict");
+
+    const resolved = await service.resolveConflictAndApply({
+      proposalId: proposal.id,
+      approverUserId: "founder_ben",
+      actorType: "human",
+      resolvedChangesJson: { jobTitle: "Chief Marketing Officer" },
+      refreshedBaseSnapshotJson: { jobTitle: "SVP Marketing" },
+      folkClient,
+      idempotencyKey: "resolve-1",
+    });
+
+    expect(resolved.outcome).toBe("applied");
+    expect(resolved.proposal.status).toBe("applied");
+    expect(folkClient.updatePerson).toHaveBeenCalledWith("per_123", {
+      jobTitle: "Chief Marketing Officer",
+    });
   });
 });

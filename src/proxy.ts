@@ -8,6 +8,7 @@ const isPublicRoute = createRouteMatcher([
   "/access-denied",
   "/api/health",
   "/api/agent(.*)",
+  "/api/mcp(.*)",
   "/api/proposals(.*)",
   "/api/messages(.*)",
 ]);

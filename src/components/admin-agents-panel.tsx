@@ -97,6 +97,45 @@ export function AdminAgentsPanel({
 
   return (
     <div className="space-y-6">
+      <div className="rounded-xl border border-border bg-surface p-5 space-y-2.5">
+        <div className="flex items-center justify-between gap-2">
+          <h2 className="text-sm font-medium text-foreground">
+            Tracker MCP Server (Claude &amp; External Agents)
+          </h2>
+          <span className="rounded-full border border-border bg-surface-elevated px-2.5 py-0.5 text-[11px] font-mono text-muted">
+            JSON-RPC 2.0
+          </span>
+        </div>
+        <p className="text-xs text-muted leading-relaxed">
+          Connect Claude or external agents to{" "}
+          <code className="font-mono text-foreground">/api/mcp</code> using{" "}
+          <code className="font-mono text-foreground">
+            Authorization: Bearer &lt;agent-token&gt;
+          </code>
+          . Available tools are scoped dynamically to the token&apos;s granted
+          permissions:
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1 text-[11px] font-mono text-muted">
+          <div className="rounded-lg border border-border bg-surface-elevated p-2.5">
+            <span className="text-foreground font-semibold block mb-1">
+              read:context
+            </span>
+            list_breakfasts, get_breakfast_preread_context, list_gold_accounts,
+            get_gold_account_context, get_proposal_status,
+            get_message_approval_status
+          </div>
+          <div className="rounded-lg border border-border bg-surface-elevated p-2.5">
+            <span className="text-foreground font-semibold block mb-1">
+              write / propose scopes
+            </span>
+            submit_research_proposal (propose:research), submit_message_draft
+            (draft:message), report_message_execution (report:execution),
+            log_outreach_activity (log:activity), manage_follow_up_action
+            (manage:actions)
+          </div>
+        </div>
+      </div>
+
       {!dbReady && (
         <div className="rounded-lg border border-warning/30 bg-warning/10 p-3 text-xs text-warning">
           Database is not yet connected/migrated. Configure{" "}

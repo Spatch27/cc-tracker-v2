@@ -12,6 +12,7 @@ import {
   type FolkCompany,
   type FolkCreateInteractionInput,
   type FolkCreateNoteInput,
+  type FolkCreatePersonInput,
   type FolkCustomField,
   type FolkGroup,
   type FolkInteraction,
@@ -326,6 +327,11 @@ export class FolkRestClient implements FolkClientInterface {
     return extractSingleEntity(raw, folkInteractionSchema);
   }
 
+  async createPerson(input: FolkCreatePersonInput): Promise<FolkPerson> {
+    const raw = await this.request<unknown>("POST", "/people", undefined, input);
+    return extractSingleEntity(raw, folkPersonSchema);
+  }
+
   async updatePerson(
     personId: string,
     input: FolkUpdatePersonInput,
@@ -368,6 +374,35 @@ export class FolkRestClient implements FolkClientInterface {
     );
     return extractSingleEntity(raw, folkInteractionSchema);
   }
+}
+
+export async function listAllFolkPeople(
+  client: FolkClientInterface,
+  maxPages = 25,
+): Promise<{ items: FolkPerson[]; pagesFetched: number; truncated: boolean }> {
+  const items: FolkPerson[] = [];
+  let cursor: string | undefined;
+  let pagesFetched = 0;
+  let truncated = false;
+  const seenCursors = new Set<string>();
+
+  while (pagesFetched < maxPages) {
+    const page = await client.listPeople({ limit: 100, cursor });
+    items.push(...page.items);
+    pagesFetched += 1;
+
+    const nextCursor = page.pagination?.nextCursor ?? undefined;
+    if (!nextCursor || seenCursors.has(nextCursor)) {
+      break;
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+    if (pagesFetched >= maxPages) {
+      truncated = true;
+    }
+  }
+
+  return { items, pagesFetched, truncated };
 }
 
 export function createFolkClientFromEnv(): FolkRestClient | null {

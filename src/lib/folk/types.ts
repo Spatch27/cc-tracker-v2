@@ -147,6 +147,18 @@ export interface FolkNoteListParams extends FolkListParams {
   createdBefore?: string;
 }
 
+export interface FolkCreatePersonInput {
+  firstName?: string | null;
+  lastName?: string | null;
+  fullName?: string | null;
+  jobTitle?: string | null;
+  description?: string | null;
+  emails?: string[];
+  urls?: string[];
+  companies?: Array<{ id?: string; name?: string }>;
+  groups?: Array<{ id: string }>;
+}
+
 export interface FolkUpdatePersonInput {
   firstName?: string | null;
   lastName?: string | null;
@@ -203,6 +215,7 @@ export interface FolkClientInterface {
     params?: FolkInteractionListParams,
   ): Promise<FolkListResponse<FolkInteraction>>;
   getInteraction(interactionId: string): Promise<FolkInteraction>;
+  createPerson(input: FolkCreatePersonInput): Promise<FolkPerson>;
   updatePerson(
     personId: string,
     input: FolkUpdatePersonInput,

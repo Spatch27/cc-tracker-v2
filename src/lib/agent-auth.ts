@@ -155,3 +155,55 @@ export async function authenticateAgentHeader(
   await repo.touchLastUsed?.(verdict.agent.id);
   return verdict.agent;
 }
+
+/**
+ * Validates only that the Bearer token belongs to a non-revoked agent identity.
+ * Used by transport endpoints (e.g. MCP JSON-RPC) that perform per-tool scope checks
+ * via `verifyAgentPermissions`.
+ */
+export async function authenticateAgentTokenOnly(
+  authHeader: string | null | undefined,
+  repo: AgentRepository = createDrizzleAgentRepository(),
+): Promise<AgentIdentityRecord> {
+  if (!authHeader || !authHeader.startsWith("Bearer ")) {
+    await repo.recordDeniedAttempt?.({
+      reason: "Missing or malformed Bearer header",
+      requiredScope: "read:context",
+      agentId: null,
+    });
+    throw new AgentAuthError("Missing Bearer agent token", 401);
+  }
+
+  const rawToken = authHeader.slice("Bearer ".length).trim();
+  if (!rawToken) {
+    await repo.recordDeniedAttempt?.({
+      reason: "Empty Bearer token",
+      requiredScope: "read:context",
+      agentId: null,
+    });
+    throw new AgentAuthError("Empty Bearer agent token", 401);
+  }
+
+  const tokenHash = hashToken(rawToken);
+  const agent = await repo.findByTokenHash(tokenHash);
+  if (!agent) {
+    await repo.recordDeniedAttempt?.({
+      reason: "Invalid agent token",
+      requiredScope: "read:context",
+      agentId: null,
+    });
+    throw new AgentAuthError("Invalid agent token", 401);
+  }
+
+  if (agent.revokedAt !== null) {
+    await repo.recordDeniedAttempt?.({
+      reason: "Agent identity has been revoked",
+      requiredScope: "read:context",
+      agentId: agent.id,
+    });
+    throw new AgentAuthError("Agent identity has been revoked", 403);
+  }
+
+  await repo.touchLastUsed?.(agent.id);
+  return agent;
+}

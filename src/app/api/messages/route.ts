@@ -35,7 +35,11 @@ export async function GET(request: Request) {
       .from(schema.messageApprovals)
       .orderBy(desc(schema.messageApprovals.createdAt))
       .limit(100);
-    return Response.json({ messages });
+    const safeMessages = messages.map(({ approvalTokenHash: _omitted, ...rest }) => {
+      void _omitted;
+      return rest;
+    });
+    return Response.json({ messages: safeMessages });
   } catch (err) {
     return errorResponse(err);
   }
@@ -79,7 +83,9 @@ export async function POST(request: Request) {
       outcome: "succeeded",
     });
 
-    return Response.json({ message }, { status: 201 });
+    const { approvalTokenHash: _omitted, ...safeMessage } = message;
+    void _omitted;
+    return Response.json({ message: safeMessage }, { status: 201 });
   } catch (err) {
     return errorResponse(err);
   }

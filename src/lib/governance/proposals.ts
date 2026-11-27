@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "@/db";
-import type { FolkClientInterface } from "@/lib/folk/types";
+import type { FolkClientInterface, FolkCreatePersonInput } from "@/lib/folk/types";
 import { canonicalStringify, computeProposalHash } from "./hashing";
 
 export type ProposalStatus =
@@ -94,6 +94,53 @@ export interface ApplyProposalResult {
   proposal: ChangeProposalRecord;
   outcome: "applied" | "already_applied" | "conflict";
   conflicts?: ConflictDetail[];
+  createdFolkId?: string;
+}
+
+export function stripInternalProposalKeys(
+  changes: Record<string, unknown>,
+): Record<string, unknown> {
+  const cleaned: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(changes)) {
+    if (!key.startsWith("_")) {
+      cleaned[key] = value;
+    }
+  }
+  return cleaned;
+}
+
+function buildFolkCreatePersonInput(
+  proposed: Record<string, unknown>,
+): FolkCreatePersonInput {
+  const input: FolkCreatePersonInput = {};
+  if (typeof proposed.firstName === "string") input.firstName = proposed.firstName;
+  if (typeof proposed.lastName === "string") input.lastName = proposed.lastName;
+  if (typeof proposed.fullName === "string") input.fullName = proposed.fullName;
+  if (typeof proposed.jobTitle === "string") input.jobTitle = proposed.jobTitle;
+  if (typeof proposed.description === "string") input.description = proposed.description;
+  if (Array.isArray(proposed.emails)) {
+    input.emails = proposed.emails.filter((v): v is string => typeof v === "string");
+  }
+  if (Array.isArray(proposed.urls)) {
+    input.urls = proposed.urls.filter((v): v is string => typeof v === "string");
+  }
+  if (Array.isArray(proposed.companies)) {
+    input.companies = proposed.companies
+      .filter((c): c is Record<string, unknown> => Boolean(c && typeof c === "object"))
+      .map((c) => ({
+        ...(typeof c.id === "string" ? { id: c.id } : {}),
+        ...(typeof c.name === "string" ? { name: c.name } : {}),
+      }));
+  }
+  if (Array.isArray(proposed.groups)) {
+    input.groups = proposed.groups
+      .filter(
+        (g): g is { id: string } =>
+          Boolean(g && typeof g === "object" && typeof (g as { id?: unknown }).id === "string"),
+      )
+      .map((g) => ({ id: g.id }));
+  }
+  return input;
 }
 
 export function detectFolkFieldConflicts(params: {
@@ -103,6 +150,7 @@ export function detectFolkFieldConflicts(params: {
 }): ConflictDetail[] {
   const conflicts: ConflictDetail[] = [];
   for (const [field, proposedValue] of Object.entries(params.proposedChanges)) {
+    if (field.startsWith("_")) continue;
     const baseValue = params.baseSnapshot[field];
     const liveFolkValue = params.liveRecord[field];
     if (canonicalStringify(baseValue ?? null) !== canonicalStringify(liveFolkValue ?? null)) {
@@ -356,13 +404,39 @@ export class ProposalGovernanceService {
       );
     }
 
+    let createdFolkId: string | undefined;
+
     if (existing.targetSystem === "folk") {
+      const isCreatePerson =
+        existing.entityType === "person" &&
+        !existing.folkRecordId &&
+        (existing.entityId.startsWith("new:") ||
+          existing.proposedChangesJson._operation === "create_person");
+
+      if (isCreatePerson) {
+        const createInput = buildFolkCreatePersonInput(existing.proposedChangesJson);
+        const created = await params.folkClient.createPerson(createInput);
+        await params.folkClient.getPerson(created.id);
+        createdFolkId = created.id;
+
+        const applied = await this.store.update(existing.id, {
+          status: "applied",
+          folkRecordId: created.id,
+          appliedAt: new Date(),
+          applyError: null,
+          idempotencyKey: params.idempotencyKey ?? existing.idempotencyKey ?? randomUUID(),
+        });
+
+        return { proposal: applied, outcome: "applied", createdFolkId };
+      }
+
       const folkId = existing.folkRecordId ?? existing.entityId;
+      const sanitizedChanges = stripInternalProposalKeys(existing.proposedChangesJson);
 
       if (existing.entityType === "person") {
         const livePerson = await params.folkClient.getPerson(folkId);
         const conflicts = detectFolkFieldConflicts({
-          proposedChanges: existing.proposedChangesJson,
+          proposedChanges: sanitizedChanges,
           baseSnapshot: existing.baseSnapshotJson,
           liveRecord: livePerson as unknown as Record<string, unknown>,
         });
@@ -374,12 +448,12 @@ export class ProposalGovernanceService {
           return { proposal: conflicted, outcome: "conflict", conflicts };
         }
 
-        await params.folkClient.updatePerson(folkId, existing.proposedChangesJson);
+        await params.folkClient.updatePerson(folkId, sanitizedChanges);
         await params.folkClient.getPerson(folkId);
       } else if (existing.entityType === "company") {
         const liveCompany = await params.folkClient.getCompany(folkId);
         const conflicts = detectFolkFieldConflicts({
-          proposedChanges: existing.proposedChangesJson,
+          proposedChanges: sanitizedChanges,
           baseSnapshot: existing.baseSnapshotJson,
           liveRecord: liveCompany as unknown as Record<string, unknown>,
         });
@@ -391,7 +465,7 @@ export class ProposalGovernanceService {
           return { proposal: conflicted, outcome: "conflict", conflicts };
         }
 
-        await params.folkClient.updateCompany(folkId, existing.proposedChangesJson);
+        await params.folkClient.updateCompany(folkId, sanitizedChanges);
         await params.folkClient.getCompany(folkId);
       }
     }
@@ -403,6 +477,65 @@ export class ProposalGovernanceService {
       idempotencyKey: params.idempotencyKey ?? existing.idempotencyKey ?? randomUUID(),
     });
 
-    return { proposal: applied, outcome: "applied" };
+    return { proposal: applied, outcome: "applied", createdFolkId };
+  }
+
+  /**
+   * Resolves a conflicted or pending proposal with founder-chosen values and a
+   * refreshed live Folk snapshot, marks it approved by the founder, and applies
+   * through the standard pre-write verification path.
+   */
+  async resolveConflictAndApply(params: {
+    proposalId: string;
+    approverUserId: string;
+    actorType: "human" | "agent";
+    resolvedChangesJson: Record<string, unknown>;
+    refreshedBaseSnapshotJson: Record<string, unknown>;
+    folkClient: FolkClientInterface;
+    reviewNote?: string | null;
+    idempotencyKey?: string;
+  }): Promise<ApplyProposalResult> {
+    if (params.actorType !== "human") {
+      throw new ForbiddenGovernanceActionError("Only an approved founder can resolve conflicts");
+    }
+
+    const existing = await this.store.getById(params.proposalId);
+    if (!existing) {
+      throw new Error(`Proposal ${params.proposalId} not found`);
+    }
+    if (
+      existing.status !== "conflict" &&
+      existing.status !== "pending_review" &&
+      existing.status !== "approved"
+    ) {
+      throw new ApprovalRequiredError(
+        `Proposal cannot be resolved from status '${existing.status}'`,
+      );
+    }
+
+    const nextHash = computeProposalHash({
+      targetSystem: existing.targetSystem,
+      entityType: existing.entityType,
+      entityId: existing.entityId,
+      folkRecordId: existing.folkRecordId,
+      proposedChangesJson: params.resolvedChangesJson,
+    });
+
+    await this.store.update(existing.id, {
+      proposedChangesJson: params.resolvedChangesJson,
+      baseSnapshotJson: params.refreshedBaseSnapshotJson,
+      payloadHash: nextHash,
+      status: "approved",
+      reviewedByUserId: params.approverUserId,
+      reviewedAt: new Date(),
+      reviewNote: params.reviewNote ?? existing.reviewNote,
+      applyError: null,
+    });
+
+    return this.applyApprovedProposal({
+      proposalId: existing.id,
+      folkClient: params.folkClient,
+      idempotencyKey: params.idempotencyKey,
+    });
   }
 }

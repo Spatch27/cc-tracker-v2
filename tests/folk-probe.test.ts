@@ -62,6 +62,7 @@ describe("runFolkReadOnlyProbe", () => {
         rawEnvelopeKeys: ["data"],
       })),
       getInteraction: vi.fn(),
+      createPerson: vi.fn(),
       updatePerson: vi.fn(),
       updateCompany: vi.fn(),
       createNote: vi.fn(),
