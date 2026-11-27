@@ -283,6 +283,8 @@ export class FolkRestClient implements FolkClientInterface {
     const raw = await this.request<unknown>("GET", "/companies", {
       limit: params?.limit,
       cursor: params?.cursor,
+      combinator: params?.combinator,
+      ...params?.filters,
     });
     return extractListEnvelope(raw, folkCompanySchema);
   }
@@ -526,6 +528,101 @@ export async function searchFolkPeople(
   );
   const lower = query.toLowerCase();
   const filtered = allItems.filter((p) => matchesQueryLocally(p, lower));
+  return { items: filtered, strategy: "paginated_scan" };
+}
+
+export async function listAllFolkCompanies(
+  client: FolkClientInterface,
+  maxPages = 40,
+): Promise<{ items: FolkCompany[]; pagesFetched: number; truncated: boolean }> {
+  const items: FolkCompany[] = [];
+  let cursor: string | undefined;
+  let pagesFetched = 0;
+  let truncated = false;
+  const seenCursors = new Set<string>();
+
+  while (pagesFetched < maxPages) {
+    const page = await client.listCompanies({ limit: 100, cursor });
+    items.push(...page.items);
+    pagesFetched += 1;
+
+    const nextCursor = page.pagination?.nextCursor ?? undefined;
+    if (!nextCursor || seenCursors.has(nextCursor)) {
+      break;
+    }
+    seenCursors.add(nextCursor);
+    cursor = nextCursor;
+    if (pagesFetched >= maxPages) {
+      truncated = true;
+    }
+  }
+
+  return { items, pagesFetched, truncated };
+}
+
+async function tryFolkCompaniesFilter(
+  client: FolkClientInterface,
+  params: FolkListParams,
+): Promise<FolkCompany[]> {
+  try {
+    const res = await client.listCompanies(params);
+    return res.items;
+  } catch (err) {
+    if (
+      err instanceof FolkApiError &&
+      (err.status === 400 || err.status === 422)
+    ) {
+      return [];
+    }
+    throw err;
+  }
+}
+
+export async function searchFolkCompanies(
+  client: FolkClientInterface,
+  rawQuery: string,
+  options?: {
+    fallbackMaxPages?: number;
+    skipPaginatedFallback?: boolean;
+  },
+): Promise<{
+  items: FolkCompany[];
+  strategy: "server_filter" | "paginated_scan";
+}> {
+  const query = rawQuery.trim();
+  if (!query) {
+    const first = await client.listCompanies({ limit: 100 });
+    return { items: first.items, strategy: "server_filter" };
+  }
+
+  const filterAttempts: FolkListParams[] = [
+    { limit: 50, filters: { "filter[name][like]": query } },
+    { limit: 50, filters: { "filter[name][contains]": query } },
+    { limit: 50, filters: { "filter[name][eq]": query } },
+  ];
+
+  for (const attempt of filterAttempts) {
+    const items = await tryFolkCompaniesFilter(client, attempt);
+    if (items.length > 0) {
+      return { items, strategy: "server_filter" };
+    }
+  }
+
+  if (options?.skipPaginatedFallback || options?.fallbackMaxPages === 0) {
+    return { items: [], strategy: "server_filter" };
+  }
+
+  const { items: allItems } = await listAllFolkCompanies(
+    client,
+    options?.fallbackMaxPages ?? 50,
+  );
+  const lower = query.toLowerCase();
+  const filtered = allItems.filter((c) =>
+    [c.name, ...(c.urls ?? []), ...(c.industries ?? [])]
+      .join(" ")
+      .toLowerCase()
+      .includes(lower),
+  );
   return { items: filtered, strategy: "paginated_scan" };
 }
 

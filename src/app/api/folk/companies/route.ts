@@ -1,6 +1,9 @@
 import { errorResponse } from "@/lib/api-auth";
 import { requireFounderSession } from "@/lib/auth";
-import { createFolkClientFromEnv } from "@/lib/folk/client";
+import {
+  createFolkClientFromEnv,
+  searchFolkCompanies,
+} from "@/lib/folk/client";
 
 export const dynamic = "force-dynamic";
 
@@ -13,10 +16,14 @@ export async function GET(request: Request) {
     }
 
     const { searchParams } = new URL(request.url);
-    const query = (searchParams.get("q") ?? "").trim().toLowerCase();
+    const query = (searchParams.get("q") ?? "").trim();
 
-    const response = await client.listCompanies({ limit: 100 });
-    const mapped = response.items.map((c) => {
+    const { items: companies, strategy } = await searchFolkCompanies(
+      client,
+      query,
+    );
+
+    const mapped = companies.map((c) => {
       const domain =
         c.urls
           .find((u) => !u.toLowerCase().includes("linkedin.com"))
@@ -30,17 +37,19 @@ export async function GET(request: Request) {
       };
     });
 
-    const filtered = query
+    const lower = query.toLowerCase();
+    const filtered = lower
       ? mapped.filter((c) =>
           [c.name, c.domain ?? "", c.industries.join(" ")]
             .join(" ")
             .toLowerCase()
-            .includes(query),
+            .includes(lower),
         )
       : mapped;
 
     return Response.json({
       folkConfigured: true,
+      searchStrategy: strategy,
       companies: filtered.slice(0, 40),
     });
   } catch (err) {
