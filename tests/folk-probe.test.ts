@@ -75,6 +75,17 @@ describe("runFolkReadOnlyProbe", () => {
     expect(fakeClient.createNote).not.toHaveBeenCalled();
     expect(fakeClient.createInteraction).not.toHaveBeenCalled();
 
+    expect(fakeClient.listGroupCustomFields).toHaveBeenCalledWith(
+      "grp_1",
+      "person",
+    );
+    expect(fakeClient.listGroupCustomFields).toHaveBeenCalledWith(
+      "grp_1",
+      "company",
+    );
+    expect(fakeClient.listInteractions).toHaveBeenCalledWith(
+      expect.objectContaining({ entityId: "per_1" }),
+    );
     expect(report.distinctInteractionUserIds).toEqual(["usr_tim", "usr_ben"]);
     expect(report.hasThreadOrConversationId).toBe(true);
     expect(report.markdownReport).not.toContain("CONFIDENTIAL_EMAIL_BODY");

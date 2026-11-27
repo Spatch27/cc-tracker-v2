@@ -1,5 +1,5 @@
 import { FolkApiError } from "./client";
-import type { FolkClientInterface } from "./types";
+import type { FolkClientInterface, FolkPerson } from "./types";
 
 export interface ProbeEndpointResult {
   endpoint: string;
@@ -31,6 +31,15 @@ function collectKeys(items: Record<string, unknown>[]): string[] {
   return Array.from(keys).sort();
 }
 
+function selectPeopleForInteractionProbe(people: FolkPerson[]): FolkPerson[] {
+  const withMetadata = people.filter((p) => {
+    const meta = (p as Record<string, unknown>).interactionMetadata;
+    return meta !== undefined && meta !== null;
+  });
+  const candidates = withMetadata.length > 0 ? withMetadata : people;
+  return candidates.slice(0, 3);
+}
+
 /**
  * Executes strictly read-only (GET) checks against Folk CRM API v1.
  * Never invokes any write methods and redacts PII / message bodies.
@@ -43,7 +52,7 @@ export async function runFolkReadOnlyProbe(
   const results: ProbeEndpointResult[] = [];
   const observations: string[] = [];
   let totalRecordsRead = 0;
-  let distinctInteractionUserIds: string[] = [];
+  const observedUserIds = new Set<string>();
   let hasThreadOrConversationId = false;
 
   // 1. Workspace members
@@ -72,7 +81,7 @@ export async function runFolkReadOnlyProbe(
     });
   }
 
-  // 2. Groups + custom fields
+  // 2. Groups + singular custom fields (person + company)
   let firstGroupId: string | null = null;
   try {
     const groups = await client.listGroups({ limit: 25 });
@@ -101,36 +110,43 @@ export async function runFolkReadOnlyProbe(
   }
 
   if (firstGroupId) {
-    try {
-      const fields = await client.listGroupCustomFields(firstGroupId);
-      totalRecordsRead += fields.items.length;
-      results.push({
-        endpoint: `GET /groups/${firstGroupId}/custom-fields`,
-        status: "OK",
-        itemCount: fields.items.length,
-        fieldKeys: collectKeys(fields.items as Record<string, unknown>[]),
-        hasNextCursor: false,
-        notes: "Custom field types visible for first group.",
-      });
-    } catch (err) {
-      const status = err instanceof FolkApiError ? err.status : 500;
-      results.push({
-        endpoint: "GET /groups/{id}/custom-fields",
-        status,
-        itemCount: 0,
-        fieldKeys: [],
-        hasNextCursor: false,
-        notes: err instanceof Error ? err.message : "Failed",
-      });
+    for (const entityType of ["person", "company"] as const) {
+      try {
+        const fields = await client.listGroupCustomFields(
+          firstGroupId,
+          entityType,
+        );
+        totalRecordsRead += fields.items.length;
+        results.push({
+          endpoint: `GET /groups/${firstGroupId}/custom-fields/${entityType}`,
+          status: "OK",
+          itemCount: fields.items.length,
+          fieldKeys: collectKeys(fields.items as Record<string, unknown>[]),
+          hasNextCursor: false,
+          notes: `Custom field definitions for '${entityType}' in first group.`,
+        });
+      } catch (err) {
+        const status = err instanceof FolkApiError ? err.status : 500;
+        results.push({
+          endpoint: `GET /groups/${firstGroupId}/custom-fields/${entityType}`,
+          status,
+          itemCount: 0,
+          fieldKeys: [],
+          hasNextCursor: false,
+          notes: err instanceof Error ? err.message : "Failed",
+        });
+      }
     }
   }
 
-  // 3. People (read-only sample of 5)
+  // 3. People (read-only sample of 10 to pick up to 3 with interactionMetadata)
+  let sampledPeople: FolkPerson[] = [];
   try {
-    const people = await client.listPeople({ limit: 5 });
+    const people = await client.listPeople({ limit: 10 });
     totalRecordsRead += people.items.length;
+    sampledPeople = people.items;
     results.push({
-      endpoint: "GET /people?limit=5",
+      endpoint: "GET /people?limit=10",
       status: "OK",
       itemCount: people.items.length,
       fieldKeys: collectKeys(people.items as Record<string, unknown>[]),
@@ -142,7 +158,7 @@ export async function runFolkReadOnlyProbe(
   } catch (err) {
     const status = err instanceof FolkApiError ? err.status : 500;
     results.push({
-      endpoint: "GET /people?limit=5",
+      endpoint: "GET /people?limit=10",
       status,
       itemCount: 0,
       fieldKeys: [],
@@ -203,82 +219,174 @@ export async function runFolkReadOnlyProbe(
     });
   }
 
-  // 6. Interactions (past + email filter)
-  try {
-    const interactions = await client.listInteractions({
-      timeframe: "past",
-      limit: 10,
-    });
-    totalRecordsRead += interactions.items.length;
-    const observedUserIds = new Set<string>();
-    for (const item of interactions.items) {
-      const uid = item.user?.id ?? item.userId;
-      if (uid) observedUserIds.add(uid);
-      if (item.threadId || item.conversationId) {
-        hasThreadOrConversationId = true;
+  // 6. Entity-scoped Interactions across up to 3 sampled people
+  const interactionCandidates = selectPeopleForInteractionProbe(sampledPeople);
+  let interactionQueryParamStyle: "entity.id" | "filter[entity.id]" =
+    "entity.id";
+  const interactionItemsAll: Record<string, unknown>[] = [];
+  let interactionQuerySucceeded = false;
+  let interactionNextCursor = false;
+  let lastInteractionError: { status: number | "OK"; notes: string } | null =
+    null;
+
+  for (const person of interactionCandidates) {
+    try {
+      const res = await client.listInteractions({
+        entityId: person.id,
+        timeframe: "past",
+        limit: 10,
+      });
+      interactionQuerySucceeded = true;
+      totalRecordsRead += res.items.length;
+      if (res.pagination?.nextCursor || res.pagination?.nextLink) {
+        interactionNextCursor = true;
       }
+      for (const item of res.items) {
+        interactionItemsAll.push(item as Record<string, unknown>);
+        const uid = item.user?.id ?? item.userId;
+        if (uid) observedUserIds.add(uid);
+        if (item.threadId || item.conversationId) {
+          hasThreadOrConversationId = true;
+        }
+      }
+    } catch (err) {
+      const status = err instanceof FolkApiError ? err.status : 500;
+      if (status === 422 && !interactionQuerySucceeded) {
+        // Fallback check using filter[entity.id] syntax
+        try {
+          const fallbackRes = await client.listInteractions({
+            filterEntityId: person.id,
+            timeframe: "past",
+            limit: 10,
+          });
+          interactionQueryParamStyle = "filter[entity.id]";
+          interactionQuerySucceeded = true;
+          totalRecordsRead += fallbackRes.items.length;
+          if (
+            fallbackRes.pagination?.nextCursor ||
+            fallbackRes.pagination?.nextLink
+          ) {
+            interactionNextCursor = true;
+          }
+          for (const item of fallbackRes.items) {
+            interactionItemsAll.push(item as Record<string, unknown>);
+            const uid = item.user?.id ?? item.userId;
+            if (uid) observedUserIds.add(uid);
+            if (item.threadId || item.conversationId) {
+              hasThreadOrConversationId = true;
+            }
+          }
+          continue;
+        } catch (fallbackErr) {
+          const fbStatus =
+            fallbackErr instanceof FolkApiError ? fallbackErr.status : 500;
+          lastInteractionError = {
+            status: fbStatus,
+            notes:
+              fallbackErr instanceof Error ? fallbackErr.message : "Failed",
+          };
+          continue;
+        }
+      }
+      lastInteractionError = {
+        status,
+        notes: err instanceof Error ? err.message : "Failed",
+      };
     }
-    distinctInteractionUserIds = Array.from(observedUserIds);
+  }
+
+  if (interactionCandidates.length === 0) {
+    results.push({
+      endpoint: "GET /interactions?entity.id={personId}&timeframe=past",
+      status: 422,
+      itemCount: 0,
+      fieldKeys: [],
+      hasNextCursor: false,
+      notes: "No people returned from GET /people to scope interaction query.",
+    });
+  } else if (interactionQuerySucceeded) {
+    results.push({
+      endpoint: `GET /interactions?${interactionQueryParamStyle}={personId}&timeframe=past`,
+      status: "OK",
+      itemCount: interactionItemsAll.length,
+      fieldKeys: collectKeys(interactionItemsAll),
+      hasNextCursor: interactionNextCursor,
+      notes: `Probed ${interactionCandidates.length} person record(s). Distinct user IDs: ${observedUserIds.size}; thread/conversation key: ${hasThreadOrConversationId ? "yes" : "not observed"}.`,
+    });
+  } else {
+    results.push({
+      endpoint: "GET /interactions?entity.id={personId}&timeframe=past",
+      status: lastInteractionError?.status ?? 500,
+      itemCount: 0,
+      fieldKeys: [],
+      hasNextCursor: false,
+      notes: lastInteractionError?.notes ?? "Failed",
+    });
+  }
+
+  // Email-filtered entity-scoped probe on the first candidate
+  if (interactionCandidates[0]) {
+    try {
+      const emailParams =
+        interactionQueryParamStyle === "filter[entity.id]"
+          ? {
+              filterEntityId: interactionCandidates[0].id,
+              timeframe: "past" as const,
+              importedTypes: "email",
+              limit: 10,
+            }
+          : {
+              entityId: interactionCandidates[0].id,
+              timeframe: "past" as const,
+              importedTypes: "email",
+              limit: 10,
+            };
+      const emailInteractions = await client.listInteractions(emailParams);
+      totalRecordsRead += emailInteractions.items.length;
+      for (const item of emailInteractions.items) {
+        const uid = item.user?.id ?? item.userId;
+        if (uid) observedUserIds.add(uid);
+        if (item.threadId || item.conversationId) {
+          hasThreadOrConversationId = true;
+        }
+      }
+      results.push({
+        endpoint: `GET /interactions?${interactionQueryParamStyle}={personId}&importedTypes=email`,
+        status: "OK",
+        itemCount: emailInteractions.items.length,
+        fieldKeys: collectKeys(
+          emailInteractions.items as Record<string, unknown>[],
+        ),
+        hasNextCursor: Boolean(
+          emailInteractions.pagination?.nextCursor ||
+            emailInteractions.pagination?.nextLink,
+        ),
+        notes: "Email-filtered entity-scoped interaction query supported.",
+      });
+    } catch (err) {
+      const status = err instanceof FolkApiError ? err.status : 500;
+      results.push({
+        endpoint: `GET /interactions?${interactionQueryParamStyle}={personId}&importedTypes=email`,
+        status,
+        itemCount: 0,
+        fieldKeys: [],
+        hasNextCursor: false,
+        notes: err instanceof Error ? err.message : "Failed",
+      });
+    }
+  }
+
+  const distinctInteractionUserIds = Array.from(observedUserIds);
+  if (interactionCandidates.length > 0) {
+    observations.push(
+      `Sampled interactions across ${interactionCandidates.length} person record(s) using query parameter '${interactionQueryParamStyle}'.`,
+    );
     observations.push(
       `Distinct interaction user IDs observed in sample: ${distinctInteractionUserIds.length} (${distinctInteractionUserIds.join(", ") || "none"})`,
     );
     observations.push(
       `Thread/conversation ID field present on sampled interactions: ${hasThreadOrConversationId ? "yes" : "not observed"}`,
     );
-
-    results.push({
-      endpoint: "GET /interactions?timeframe=past&limit=10",
-      status: "OK",
-      itemCount: interactions.items.length,
-      fieldKeys: collectKeys(interactions.items as Record<string, unknown>[]),
-      hasNextCursor: Boolean(
-        interactions.pagination?.nextCursor ||
-          interactions.pagination?.nextLink,
-      ),
-      notes: `Distinct user IDs: ${distinctInteractionUserIds.length}; thread/conversation key: ${hasThreadOrConversationId ? "yes" : "not observed"}.`,
-    });
-  } catch (err) {
-    const status = err instanceof FolkApiError ? err.status : 500;
-    results.push({
-      endpoint: "GET /interactions?timeframe=past&limit=10",
-      status,
-      itemCount: 0,
-      fieldKeys: [],
-      hasNextCursor: false,
-      notes: err instanceof Error ? err.message : "Failed",
-    });
-  }
-
-  try {
-    const emailInteractions = await client.listInteractions({
-      timeframe: "past",
-      importedTypes: "email",
-      limit: 10,
-    });
-    totalRecordsRead += emailInteractions.items.length;
-    results.push({
-      endpoint: "GET /interactions?timeframe=past&importedTypes=email&limit=10",
-      status: "OK",
-      itemCount: emailInteractions.items.length,
-      fieldKeys: collectKeys(
-        emailInteractions.items as Record<string, unknown>[],
-      ),
-      hasNextCursor: Boolean(
-        emailInteractions.pagination?.nextCursor ||
-          emailInteractions.pagination?.nextLink,
-      ),
-      notes: "Email-filtered interaction query supported.",
-    });
-  } catch (err) {
-    const status = err instanceof FolkApiError ? err.status : 500;
-    results.push({
-      endpoint: "GET /interactions?timeframe=past&importedTypes=email&limit=10",
-      status,
-      itemCount: 0,
-      fieldKeys: [],
-      hasNextCursor: false,
-      notes: err instanceof Error ? err.message : "Failed",
-    });
   }
 
   const reportLines = [

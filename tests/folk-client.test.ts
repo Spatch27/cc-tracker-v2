@@ -83,4 +83,34 @@ describe("FolkRestClient", () => {
       expect((err as Error).message).not.toContain(secret);
     }
   });
+
+  it("uses singular custom-fields paths and entity.id query param for interactions", async () => {
+    const requestedUrls: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      requestedUrls.push(String(input));
+      return new Response(
+        JSON.stringify({ data: { items: [], pagination: {} } }),
+        { status: 200 },
+      );
+    });
+
+    const client = new FolkRestClient({
+      apiKey: "test-secret",
+      fetchFn: fetchMock as unknown as typeof fetch,
+      baseDelayMs: 1,
+    });
+
+    await client.listGroupCustomFields("grp_123", "person");
+    await client.listInteractions({
+      entityId: "per_456",
+      timeframe: "past",
+      importedTypes: "email",
+    });
+
+    expect(requestedUrls[0]).toBe(
+      "https://api.folk.app/v1/groups/grp_123/custom-fields/person",
+    );
+    expect(requestedUrls[1]).toContain("entity.id=per_456");
+    expect(requestedUrls[1]).toContain("importedTypes=email");
+  });
 });

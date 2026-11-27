@@ -134,6 +134,8 @@ export interface FolkListParams {
 }
 
 export interface FolkInteractionListParams extends FolkListParams {
+  entityId?: string;
+  filterEntityId?: string;
   timeframe?: "past" | "upcoming";
   importedTypes?: string;
   userId?: string;
@@ -190,7 +192,7 @@ export interface FolkClientInterface {
   listGroups(params?: FolkListParams): Promise<FolkListResponse<FolkGroup>>;
   listGroupCustomFields(
     groupId: string,
-    entityType?: "people" | "companies" | "deals",
+    entityType?: "person" | "company",
   ): Promise<FolkListResponse<FolkCustomField>>;
   listPeople(params?: FolkListParams): Promise<FolkListResponse<FolkPerson>>;
   getPerson(personId: string): Promise<FolkPerson>;

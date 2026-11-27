@@ -200,7 +200,27 @@ export class FolkRestClient implements FolkClientInterface {
       }
 
       const shouldRetry = response.status === 429 || response.status >= 500;
-      const safeMessage = `Folk API ${method} ${normalizedPath} failed with HTTP ${response.status}`;
+      let detail = "";
+      if (response.status === 400 || response.status === 422) {
+        try {
+          const text = await response.text();
+          if (text) {
+            const parsed = JSON.parse(text) as Record<string, unknown>;
+            const rawDetail =
+              parsed.message ?? parsed.error ?? parsed.details ?? text;
+            const serialized =
+              typeof rawDetail === "string"
+                ? rawDetail
+                : JSON.stringify(rawDetail);
+            if (!serialized.includes(this.apiKey)) {
+              detail = `: ${serialized.slice(0, 200)}`;
+            }
+          }
+        } catch {
+          // Ignore unparseable validation error payloads.
+        }
+      }
+      const safeMessage = `Folk API ${method} ${normalizedPath} failed with HTTP ${response.status}${detail}`;
 
       if (!shouldRetry || attempt === this.maxRetries - 1) {
         throw new FolkApiError(safeMessage, response.status, normalizedPath);
@@ -233,11 +253,9 @@ export class FolkRestClient implements FolkClientInterface {
 
   async listGroupCustomFields(
     groupId: string,
-    entityType?: "people" | "companies" | "deals",
+    entityType: "person" | "company" = "person",
   ): Promise<FolkListResponse<FolkCustomField>> {
-    const path = entityType
-      ? `/groups/${encodeURIComponent(groupId)}/custom-fields/${entityType}`
-      : `/groups/${encodeURIComponent(groupId)}/custom-fields`;
+    const path = `/groups/${encodeURIComponent(groupId)}/custom-fields/${entityType}`;
     const raw = await this.request<unknown>("GET", path);
     return extractListEnvelope(raw, folkCustomFieldSchema);
   }
@@ -291,6 +309,8 @@ export class FolkRestClient implements FolkClientInterface {
     const raw = await this.request<unknown>("GET", "/interactions", {
       limit: params?.limit,
       cursor: params?.cursor,
+      "entity.id": params?.entityId,
+      "filter[entity.id]": params?.filterEntityId,
       timeframe: params?.timeframe,
       importedTypes: params?.importedTypes,
       "user.id": params?.userId,
