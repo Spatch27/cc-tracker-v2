@@ -8,6 +8,7 @@ import {
   CheckCircle2,
   MapPin,
   Plus,
+  Upload,
   Users,
   X,
 } from "lucide-react";
@@ -154,15 +155,24 @@ export function BreakfastsListClient({
           </p>
         </div>
 
-        <button
-          type="button"
-          disabled={!dbReady}
-          onClick={() => setShowCreate(true)}
-          className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-4 py-2 text-xs font-semibold text-accent-foreground hover:opacity-90 disabled:opacity-40"
-        >
-          <Plus className="h-4 w-4" />
-          New Breakfast
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <Link
+            href="/breakfasts/import"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface-elevated px-3.5 py-2 text-xs font-medium text-foreground hover:border-accent"
+          >
+            <Upload className="h-3.5 w-3.5 text-accent" />
+            Import from Excel
+          </Link>
+          <button
+            type="button"
+            disabled={!dbReady}
+            onClick={() => setShowCreate(true)}
+            className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-4 py-2 text-xs font-semibold text-accent-foreground hover:opacity-90 disabled:opacity-40"
+          >
+            <Plus className="h-4 w-4" />
+            New Breakfast
+          </button>
+        </div>
       </div>
 
       {!dbReady && (
