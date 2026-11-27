@@ -1,0 +1,1732 @@
+"use client";
+
+import { useState } from "react";
+import Link from "next/link";
+import { useRouter } from "next/navigation";
+import {
+  AlertTriangle,
+  ArrowLeft,
+  CalendarDays,
+  Check,
+  ChevronDown,
+  ChevronUp,
+  Copy,
+  CreditCard,
+  History,
+  MailPlus,
+  MapPin,
+  Search,
+  Sparkles,
+  UserPlus,
+  X,
+} from "lucide-react";
+import type { FounderOption } from "@/lib/founders";
+import type { BreakfastCapacityMetrics } from "@/lib/breakfasts/rules";
+
+export interface SerializedInvitee {
+  id: string;
+  eventId: string;
+  folkPersonLinkId: string;
+  responseStatus: "provisional" | "no_response" | "accepted" | "maybe" | "declined";
+  attendanceOutcome: "pending" | "attended" | "cancelled_in_advance" | "no_show";
+  waitlistStatus: "none" | "waitlisted" | "offered_place" | "confirmed_replacement";
+  chaseStatus: string;
+  carriedForwardFromEventId: string | null;
+  dietaryNotes: string | null;
+  specialRequests: string | null;
+  earlyDepartureNote: string | null;
+  person: {
+    id: string;
+    folkPersonId: string;
+    fullName: string;
+    email: string | null;
+    jobTitle: string | null;
+    linkedinUrl: string | null;
+    contactSuppressed: boolean;
+    suppressionReason: string | null;
+    companyName: string | null;
+  } | null;
+  history: Array<{
+    id: string;
+    previousResponseStatus: string | null;
+    newResponseStatus: string | null;
+    previousAttendanceOutcome: string | null;
+    newAttendanceOutcome: string | null;
+    previousWaitlistStatus: string | null;
+    newWaitlistStatus: string | null;
+    note: string | null;
+    createdAt: string;
+  }>;
+}
+
+export interface SerializedBreakfastWorkspace {
+  event: {
+    id: string;
+    locale: string;
+    title: string;
+    eventDate: string;
+    venueName: string | null;
+    venueAddress: string | null;
+    totalCapacity: number;
+    status: "planning" | "inviting" | "confirmed" | "completed" | "cancelled";
+    bookingStatus: string | null;
+    bookingReference: string | null;
+    venueContact: string | null;
+    bookingDocsUrl: string | null;
+    depositAmountPence: number | null;
+    depositDueDate: string | null;
+    depositInvoiceRef: string | null;
+    depositPaid: boolean;
+    balanceAmountPence: number | null;
+    balanceDueDate: string | null;
+    balanceInvoiceRef: string | null;
+    balancePaid: boolean;
+    logisticsOwnerUserId: string | null;
+    prereadUrl: string | null;
+    prereadNotes: string | null;
+  };
+  founders: FounderOption[];
+  hosts: Array<{ id: string; userId: string; attending: boolean }>;
+  capacity: BreakfastCapacityMetrics;
+  invitations: SerializedInvitee[];
+  feedback: Array<{
+    id: string;
+    category: string;
+    summary: string;
+    createdAt: string;
+  }>;
+  referrals: Array<{
+    id: string;
+    referredByFolkPersonLinkId: string | null;
+    referredName: string;
+    referredCompany: string | null;
+    referredRole: string | null;
+    referredEmail: string | null;
+    status: "new" | "researching" | "added_to_folk" | "invited" | "dismissed";
+    notes: string | null;
+    createdAt: string;
+  }>;
+  manualCarryForwardOptions: Array<{
+    folkPersonLinkId: string;
+    fullName: string;
+    email: string | null;
+    jobTitle: string | null;
+    companyName: string | null;
+    sourceEventId: string;
+    sourceEventTitle: string;
+    sourceResponseStatus: string;
+    sourceAttendanceOutcome: string;
+  }>;
+}
+
+interface FolkSearchPerson {
+  folkPersonId: string;
+  fullName: string;
+  email: string | null;
+  jobTitle: string | null;
+  folkCompanyId: string | null;
+  companyName: string | null;
+  linkedinUrl: string | null;
+}
+
+function penceToGbpString(pence: number | null): string {
+  if (pence === null || pence === undefined) return "";
+  return (pence / 100).toFixed(2);
+}
+
+function gbpStringToPence(val: string): number | null {
+  const trimmed = val.trim();
+  if (!trimmed) return null;
+  const num = Number(trimmed);
+  if (Number.isNaN(num) || num < 0) return null;
+  return Math.round(num * 100);
+}
+
+function formatDateInput(iso: string | null): string {
+  if (!iso) return "";
+  return iso.slice(0, 10);
+}
+
+export function BreakfastWorkspaceClient({
+  initialWorkspace,
+  currentFounderUserId,
+}: {
+  initialWorkspace: SerializedBreakfastWorkspace;
+  currentFounderUserId: string | null;
+}) {
+  const router = useRouter();
+  const [ws, setWs] = useState<SerializedBreakfastWorkspace>(initialWorkspace);
+  const [activeTab, setActiveTab] = useState<
+    "invitees" | "logistics" | "preread"
+  >("invitees");
+  const [inviteFilter, setInviteFilter] = useState<string>("all");
+  const [banner, setBanner] = useState<{
+    kind: "info" | "warning" | "error";
+    text: string;
+  } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  // Folk search modal
+  const [showFolkModal, setShowFolkModal] = useState(false);
+  const [folkQuery, setFolkQuery] = useState("");
+  const [folkPeople, setFolkPeople] = useState<FolkSearchPerson[]>([]);
+  const [searchingFolk, setSearchingFolk] = useState(false);
+  const [folkConfigured, setFolkConfigured] = useState(true);
+
+  // Manual carry-forward modal
+  const [showCarryModal, setShowCarryModal] = useState(false);
+
+  // Expanded invitee drawer
+  const [expandedInvId, setExpandedInvId] = useState<string | null>(null);
+  const [noteEdits, setNoteEdits] = useState<
+    Record<
+      string,
+      { dietaryNotes: string; specialRequests: string; earlyDepartureNote: string }
+    >
+  >({});
+
+  // Logistics form state
+  const [venueName, setVenueName] = useState(ws.event.venueName ?? "");
+  const [venueAddress, setVenueAddress] = useState(ws.event.venueAddress ?? "");
+  const [bookingStatus, setBookingStatus] = useState(
+    ws.event.bookingStatus ?? "unconfirmed",
+  );
+  const [bookingReference, setBookingReference] = useState(
+    ws.event.bookingReference ?? "",
+  );
+  const [venueContact, setVenueContact] = useState(ws.event.venueContact ?? "");
+  const [bookingDocsUrl, setBookingDocsUrl] = useState(
+    ws.event.bookingDocsUrl ?? "",
+  );
+  const [logisticsOwnerUserId, setLogisticsOwnerUserId] = useState(
+    ws.event.logisticsOwnerUserId ?? "",
+  );
+  const [depositGbp, setDepositGbp] = useState(
+    penceToGbpString(ws.event.depositAmountPence),
+  );
+  const [depositDueDate, setDepositDueDate] = useState(
+    formatDateInput(ws.event.depositDueDate),
+  );
+  const [depositInvoiceRef, setDepositInvoiceRef] = useState(
+    ws.event.depositInvoiceRef ?? "",
+  );
+  const [depositPaid, setDepositPaid] = useState(ws.event.depositPaid);
+  const [balanceGbp, setBalanceGbp] = useState(
+    penceToGbpString(ws.event.balanceAmountPence),
+  );
+  const [balanceDueDate, setBalanceDueDate] = useState(
+    formatDateInput(ws.event.balanceDueDate),
+  );
+  const [balanceInvoiceRef, setBalanceInvoiceRef] = useState(
+    ws.event.balanceInvoiceRef ?? "",
+  );
+  const [balancePaid, setBalancePaid] = useState(ws.event.balancePaid);
+
+  // Preread + Feedback + Referrals state
+  const [prereadUrl, setPrereadUrl] = useState(ws.event.prereadUrl ?? "");
+  const [prereadNotes, setPrereadNotes] = useState(ws.event.prereadNotes ?? "");
+  const [copiedPreread, setCopiedPreread] = useState(false);
+
+  const [fbCategory, setFbCategory] = useState<
+    "event" | "format" | "venue" | "attendee_mix" | "content"
+  >("event");
+  const [fbSummary, setFbSummary] = useState("");
+
+  const [refName, setRefName] = useState("");
+  const [refCompany, setRefCompany] = useState("");
+  const [refRole, setRefRole] = useState("");
+  const [refEmail, setRefEmail] = useState("");
+  const [refByPersonId, setRefByPersonId] = useState("");
+  const [refNotes, setRefNotes] = useState("");
+
+  async function refreshWorkspace() {
+    const res = await fetch(`/api/breakfasts/${ws.event.id}`);
+    if (res.ok) {
+      const data = await res.json();
+      setWs(data);
+    }
+    router.refresh();
+  }
+
+  async function patchEvent(payload: Record<string, unknown>, message?: string) {
+    setBusy(true);
+    setBanner(null);
+    try {
+      const res = await fetch(`/api/breakfasts/${ws.event.id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setBanner({ kind: "error", text: data.error ?? "Failed to update event" });
+        return;
+      }
+      setWs(data);
+      if (message) setBanner({ kind: "info", text: message });
+      router.refresh();
+    } catch {
+      setBanner({ kind: "error", text: "Network error updating event" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function toggleHost(userId: string) {
+    const current = ws.hosts.filter((h) => h.attending).map((h) => h.userId);
+    const next = current.includes(userId)
+      ? current.filter((id) => id !== userId)
+      : [...current, userId];
+    await patchEvent({ attendingHostUserIds: next });
+  }
+
+  async function searchFolk(q: string) {
+    setSearchingFolk(true);
+    try {
+      const res = await fetch(`/api/folk/people?q=${encodeURIComponent(q)}`);
+      const data = await res.json();
+      setFolkConfigured(data.folkConfigured !== false);
+      setFolkPeople(data.people ?? []);
+    } catch {
+      setBanner({ kind: "error", text: "Failed to search Folk contacts" });
+    } finally {
+      setSearchingFolk(false);
+    }
+  }
+
+  async function addFromFolk(person: FolkSearchPerson) {
+    setBusy(true);
+    setBanner(null);
+    try {
+      const res = await fetch(`/api/breakfasts/${ws.event.id}/invitees`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "folk",
+          folkPersonId: person.folkPersonId,
+          fullName: person.fullName,
+          email: person.email,
+          jobTitle: person.jobTitle,
+          folkCompanyId: person.folkCompanyId,
+          companyName: person.companyName,
+          linkedinUrl: person.linkedinUrl,
+          initialResponseStatus: "provisional",
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setBanner({ kind: "error", text: data.error ?? "Could not add contact" });
+        return;
+      }
+      setBanner({
+        kind: "info",
+        text: `Added ${person.fullName} to the provisional list.`,
+      });
+      await refreshWorkspace();
+    } catch {
+      setBanner({ kind: "error", text: "Network error adding invitee" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function addManualCarryForward(opt: SerializedBreakfastWorkspace["manualCarryForwardOptions"][number]) {
+    setBusy(true);
+    setBanner(null);
+    try {
+      const res = await fetch(`/api/breakfasts/${ws.event.id}/invitees`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          mode: "existing_link",
+          folkPersonLinkId: opt.folkPersonLinkId,
+          carriedForwardFromEventId: opt.sourceEventId,
+          initialResponseStatus: "provisional",
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setBanner({ kind: "error", text: data.error ?? "Could not carry forward" });
+        return;
+      }
+      setBanner({
+        kind: "info",
+        text: `Carried forward ${opt.fullName} as provisional (zero event notes copied).`,
+      });
+      await refreshWorkspace();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function patchInvitee(
+    invitationId: string,
+    payload: Record<string, unknown>,
+  ) {
+    setBusy(true);
+    setBanner(null);
+    try {
+      const res = await fetch(
+        `/api/breakfasts/${ws.event.id}/invitees/${invitationId}`,
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload),
+        },
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setBanner({ kind: "error", text: data.error ?? "Update failed" });
+        return;
+      }
+
+      if (data.wasAutoWaitlisted) {
+        setBanner({
+          kind: "warning",
+          text: "Event is at guest capacity — acceptance recorded on the waitlist (never overbooks).",
+        });
+      } else if (data.carryForwardAction === "carried_to_next_event") {
+        setBanner({
+          kind: "info",
+          text: "Automatically added to the provisional list for the next same-locale breakfast.",
+        });
+      } else if (data.carryForwardAction === "queued_for_locale") {
+        setBanner({
+          kind: "info",
+          text: `Queued for automatic provisional inclusion when the next ${ws.event.locale} breakfast is created.`,
+        });
+      } else if (data.carryForwardAction === "skipped_suppressed") {
+        setBanner({
+          kind: "warning",
+          text: "Contact is marked Do Not Contact — excluded from automatic carry-forward.",
+        });
+      }
+
+      await refreshWorkspace();
+    } catch {
+      setBanner({ kind: "error", text: "Network error updating invitee" });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function draftApprovalMessage(inv: SerializedInvitee) {
+    if (!inv.person?.email) {
+      setBanner({
+        kind: "warning",
+        text: `${inv.person?.fullName ?? "This contact"} has no email address linked in Folk yet.`,
+      });
+      return;
+    }
+    const senderId = currentFounderUserId ?? ws.founders[0]?.id;
+    if (!senderId) {
+      setBanner({ kind: "error", text: "No founder user record found" });
+      return;
+    }
+
+    setBusy(true);
+    try {
+      const isWaitlistOffer = inv.waitlistStatus === "offered_place";
+      const res = await fetch("/api/messages", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          breakfastEventId: ws.event.id,
+          folkPersonLinkId: inv.folkPersonLinkId,
+          senderUserId: senderId,
+          recipientName: inv.person.fullName,
+          recipientAddress: inv.person.email,
+          channel: "email",
+          subject: isWaitlistOffer
+            ? `Seat opened: ${ws.event.title}`
+            : `Invitation: ${ws.event.title}`,
+          body: isWaitlistOffer
+            ? `Hi ${inv.person.fullName.split(" ")[0]},\n\nA place has just opened up for our ${ws.event.locale} CMO breakfast (${ws.event.title}). Would you like me to confirm your seat?\n\nBest,`
+            : `Hi ${inv.person.fullName.split(" ")[0]},\n\nWe're hosting a small CMO breakfast in ${ws.event.locale} (${ws.event.title}) and would love to have you join us.\n\nBest,`,
+          initialStatus: "awaiting_approval",
+        }),
+      });
+      if (!res.ok) {
+        const d = await res.json();
+        setBanner({ kind: "error", text: d.error ?? "Failed to create draft" });
+        return;
+      }
+      setBanner({
+        kind: "info",
+        text: `Draft message queued in Message Approvals for ${inv.person.fullName} (approval required before sending).`,
+      });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyPrereadContext() {
+    const res = await fetch(`/api/breakfasts/${ws.event.id}/preread-context`);
+    if (!res.ok) {
+      setBanner({ kind: "error", text: "Failed to build preread context" });
+      return;
+    }
+    const data = await res.json();
+    await navigator.clipboard.writeText(data.markdown);
+    setCopiedPreread(true);
+    setTimeout(() => setCopiedPreread(false), 2000);
+  }
+
+  async function submitFeedback(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/breakfasts/${ws.event.id}/feedback`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ category: fbCategory, summary: fbSummary }),
+      });
+      if (res.ok) {
+        setFbSummary("");
+        await refreshWorkspace();
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitReferral(e: React.FormEvent) {
+    e.preventDefault();
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/breakfasts/${ws.event.id}/referrals`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          referredByFolkPersonLinkId: refByPersonId || null,
+          referredName: refName,
+          referredCompany: refCompany || null,
+          referredRole: refRole || null,
+          referredEmail: refEmail || null,
+          notes: refNotes || null,
+        }),
+      });
+      if (res.ok) {
+        setRefName("");
+        setRefCompany("");
+        setRefRole("");
+        setRefEmail("");
+        setRefNotes("");
+        await refreshWorkspace();
+      }
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const attendingHostIds = new Set(
+    ws.hosts.filter((h) => h.attending).map((h) => h.userId),
+  );
+
+  const filteredInvitees = ws.invitations.filter((inv) => {
+    if (inviteFilter === "all") return true;
+    if (inviteFilter === "confirmed") {
+      return (
+        inv.attendanceOutcome !== "cancelled_in_advance" &&
+        inv.attendanceOutcome !== "no_show" &&
+        ((inv.responseStatus === "accepted" && inv.waitlistStatus === "none") ||
+          inv.waitlistStatus === "confirmed_replacement")
+      );
+    }
+    if (inviteFilter === "waitlist") {
+      return (
+        inv.waitlistStatus === "waitlisted" ||
+        inv.waitlistStatus === "offered_place"
+      );
+    }
+    if (inviteFilter === "cancelled_noshow") {
+      return (
+        inv.attendanceOutcome === "cancelled_in_advance" ||
+        inv.attendanceOutcome === "no_show"
+      );
+    }
+    return inv.responseStatus === inviteFilter;
+  });
+
+  const existingPersonLinkIds = new Set(
+    ws.invitations.map((i) => i.folkPersonLinkId),
+  );
+
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+        <div className="space-y-1">
+          <Link
+            href="/breakfasts"
+            className="inline-flex items-center gap-1 text-xs text-muted hover:text-foreground"
+          >
+            <ArrowLeft className="h-3.5 w-3.5" />
+            All CMO Breakfasts
+          </Link>
+          <div className="flex items-center gap-2.5 flex-wrap">
+            <h1 className="text-2xl font-semibold tracking-tight">
+              {ws.event.title}
+            </h1>
+            <span className="inline-flex items-center gap-1 rounded-md bg-accent/15 px-2.5 py-0.5 text-xs font-medium text-accent">
+              <MapPin className="h-3.5 w-3.5" />
+              {ws.event.locale}
+            </span>
+          </div>
+          <p className="text-xs text-muted flex items-center gap-2">
+            <CalendarDays className="h-3.5 w-3.5" />
+            {new Date(ws.event.eventDate).toLocaleString("en-GB", {
+              weekday: "short",
+              day: "numeric",
+              month: "short",
+              year: "numeric",
+              hour: "2-digit",
+              minute: "2-digit",
+            })}
+            · {ws.event.venueName ?? "Venue TBC"}
+          </p>
+        </div>
+
+        <div className="flex items-center gap-2">
+          <label className="text-xs text-muted">Status:</label>
+          <select
+            value={ws.event.status}
+            disabled={busy}
+            onChange={(e) => patchEvent({ status: e.target.value })}
+            className="rounded-lg border border-border bg-surface-elevated px-3 py-1.5 text-xs font-medium text-foreground"
+          >
+            <option value="planning">planning</option>
+            <option value="inviting">inviting</option>
+            <option value="confirmed">confirmed</option>
+            <option value="completed">completed</option>
+            <option value="cancelled">cancelled</option>
+          </select>
+        </div>
+      </div>
+
+      {banner && (
+        <div
+          className={`rounded-xl border p-3.5 text-xs flex items-center justify-between gap-3 ${
+            banner.kind === "error"
+              ? "border-danger/40 bg-danger/10 text-danger"
+              : banner.kind === "warning"
+                ? "border-warning/40 bg-warning/10 text-warning"
+                : "border-success/40 bg-success/10 text-success"
+          }`}
+        >
+          <span>{banner.text}</span>
+          <button type="button" onClick={() => setBanner(null)}>
+            <X className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      )}
+
+      {/* Capacity & Host-aware Strip */}
+      <section className="rounded-xl border border-border bg-surface p-4 space-y-3">
+        <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 text-xs">
+          <div className="rounded-lg bg-surface-elevated border border-border p-3">
+            <span className="text-muted block">Room Capacity</span>
+            <input
+              type="number"
+              min={2}
+              max={100}
+              defaultValue={ws.event.totalCapacity}
+              onBlur={(e) => {
+                const val = Number(e.target.value);
+                if (val >= 2 && val !== ws.event.totalCapacity) {
+                  patchEvent({ totalCapacity: val });
+                }
+              }}
+              className="mt-1 w-16 rounded border border-border bg-background px-2 py-0.5 text-sm font-semibold text-foreground"
+            />
+          </div>
+          <div className="rounded-lg bg-surface-elevated border border-border p-3">
+            <span className="text-muted block">Attending Hosts</span>
+            <span className="mt-1 block text-lg font-semibold">
+              {ws.capacity.attendingHostCount}
+            </span>
+          </div>
+          <div className="rounded-lg bg-surface-elevated border border-border p-3">
+            <span className="text-muted block">Guest Places</span>
+            <span className="mt-1 block text-lg font-semibold text-accent">
+              {ws.capacity.guestCapacity}
+            </span>
+          </div>
+          <div className="rounded-lg bg-surface-elevated border border-border p-3">
+            <span className="text-muted block">Confirmed</span>
+            <span className="mt-1 block text-lg font-semibold">
+              {ws.capacity.confirmedGuestCount}
+            </span>
+          </div>
+          <div className="rounded-lg bg-surface-elevated border border-border p-3">
+            <span className="text-muted block">Open Guest Seats</span>
+            <span className="mt-1 block text-lg font-semibold text-success">
+              {ws.capacity.availableGuestPlaces}
+            </span>
+          </div>
+          <div className="rounded-lg bg-surface-elevated border border-border p-3">
+            <span className="text-muted block">Waitlist / Offered</span>
+            <span className="mt-1 block text-lg font-semibold">
+              {ws.capacity.waitlistedCount} / {ws.capacity.offeredPlaceCount}
+            </span>
+          </div>
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2 text-xs">
+          <span className="text-muted">Hosts attending (count toward room cap):</span>
+          {ws.founders.map((f) => {
+            const attending = attendingHostIds.has(f.id);
+            return (
+              <button
+                key={f.id}
+                type="button"
+                disabled={busy}
+                onClick={() => toggleHost(f.id)}
+                className={`rounded-lg border px-2.5 py-1 transition-colors ${
+                  attending
+                    ? "border-accent bg-accent/15 text-accent font-medium"
+                    : "border-border bg-surface-elevated text-muted"
+                }`}
+              >
+                {attending ? "✓ " : ""}
+                {f.name}
+              </button>
+            );
+          })}
+        </div>
+      </section>
+
+      {ws.capacity.hasFreedPlaceForWaitlist && (
+        <div className="rounded-xl border border-warning/40 bg-warning/10 p-4 flex items-start gap-3 text-xs text-warning">
+          <AlertTriangle className="h-4 w-4 shrink-0 mt-0.5" />
+          <div>
+            <p className="font-semibold">
+              {ws.capacity.availableGuestPlaces} guest seat(s) free with{" "}
+              {ws.capacity.waitlistedCount} contact(s) on the waitlist
+            </p>
+            <p className="mt-0.5 opacity-90">
+              No automatic promotion or sending occurs. Choose a waitlisted
+              person below and click <strong>Offer Place</strong> manually.
+            </p>
+          </div>
+        </div>
+      )}
+
+      {/* Tabs */}
+      <div className="flex gap-2 border-b border-border pb-2">
+        {(
+          [
+            ["invitees", `Invitees & Waitlist (${ws.invitations.length})`],
+            ["logistics", "Booking & Payments"],
+            ["preread", "Preread & Post-Event"],
+          ] as const
+        ).map(([key, label]) => (
+          <button
+            key={key}
+            type="button"
+            onClick={() => setActiveTab(key)}
+            className={`rounded-lg px-3.5 py-1.5 text-xs font-medium transition-colors ${
+              activeTab === key
+                ? "bg-surface-elevated text-foreground border border-border"
+                : "text-muted hover:text-foreground"
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {/* TAB 1: Invitees & Waitlist */}
+      {activeTab === "invitees" && (
+        <div className="space-y-4">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap gap-1.5">
+              {(
+                [
+                  ["all", "All"],
+                  ["confirmed", "Confirmed"],
+                  ["provisional", "Provisional"],
+                  ["no_response", "No response"],
+                  ["maybe", "Maybe"],
+                  ["waitlist", "Waitlist"],
+                  ["declined", "Declined"],
+                  ["cancelled_noshow", "Cancelled / No-show"],
+                ] as const
+              ).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setInviteFilter(key)}
+                  className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                    inviteFilter === key
+                      ? "border-accent bg-accent/15 text-accent"
+                      : "border-border bg-surface text-muted hover:text-foreground"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowFolkModal(true);
+                  searchFolk("");
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-xs font-semibold text-accent-foreground"
+              >
+                <UserPlus className="h-3.5 w-3.5" />
+                Add from Folk CRM
+              </button>
+              <button
+                type="button"
+                onClick={() => setShowCarryModal(true)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface-elevated px-3.5 py-2 text-xs font-medium text-foreground hover:border-accent/50"
+              >
+                Manual Carry-Forward ({ws.manualCarryForwardOptions.length})
+              </button>
+            </div>
+          </div>
+
+          {filteredInvitees.length === 0 ? (
+            <div className="rounded-xl border border-border bg-surface p-6 text-sm text-muted">
+              No invitees match this filter. Click{" "}
+              <strong className="text-foreground">Add from Folk CRM</strong> to
+              link prospects directly from Folk.
+            </div>
+          ) : (
+            <div className="space-y-2.5">
+              {filteredInvitees.map((inv) => {
+                const isExpanded = expandedInvId === inv.id;
+                const notes = noteEdits[inv.id] ?? {
+                  dietaryNotes: inv.dietaryNotes ?? "",
+                  specialRequests: inv.specialRequests ?? "",
+                  earlyDepartureNote: inv.earlyDepartureNote ?? "",
+                };
+
+                return (
+                  <div
+                    key={inv.id}
+                    className="rounded-xl border border-border bg-surface p-4 space-y-3"
+                  >
+                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-sm font-semibold text-foreground">
+                            {inv.person?.fullName ?? "Unknown Contact"}
+                          </span>
+                          {inv.carriedForwardFromEventId && (
+                            <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium text-accent">
+                              Carried forward
+                            </span>
+                          )}
+                          {inv.waitlistStatus !== "none" && (
+                            <span className="rounded bg-warning/15 border border-warning/30 px-1.5 py-0.5 text-[10px] font-mono text-warning">
+                              {inv.waitlistStatus}
+                            </span>
+                          )}
+                          {inv.person?.contactSuppressed && (
+                            <span className="rounded bg-danger/15 px-1.5 py-0.5 text-[10px] font-medium text-danger">
+                              Do Not Contact
+                            </span>
+                          )}
+                        </div>
+                        <p className="text-xs text-muted">
+                          {[
+                            inv.person?.jobTitle,
+                            inv.person?.companyName,
+                            inv.person?.email,
+                          ]
+                            .filter(Boolean)
+                            .join(" · ") || inv.person?.folkPersonId}
+                        </p>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2 text-xs">
+                        <select
+                          aria-label="Response status"
+                          disabled={busy}
+                          value={inv.responseStatus}
+                          onChange={(e) =>
+                            patchInvitee(inv.id, {
+                              responseStatus: e.target.value,
+                            })
+                          }
+                          className="rounded-lg border border-border bg-surface-elevated px-2.5 py-1 text-xs"
+                        >
+                          <option value="provisional">Response: provisional</option>
+                          <option value="no_response">Response: no response</option>
+                          <option value="accepted">Response: accepted</option>
+                          <option value="maybe">Response: maybe</option>
+                          <option value="declined">Response: declined</option>
+                        </select>
+
+                        <select
+                          aria-label="Attendance outcome"
+                          disabled={busy}
+                          value={inv.attendanceOutcome}
+                          onChange={(e) =>
+                            patchInvitee(inv.id, {
+                              attendanceOutcome: e.target.value,
+                            })
+                          }
+                          className="rounded-lg border border-border bg-surface-elevated px-2.5 py-1 text-xs"
+                        >
+                          <option value="pending">Attendance: pending</option>
+                          <option value="attended">Attendance: attended</option>
+                          <option value="cancelled_in_advance">
+                            Attendance: cancelled
+                          </option>
+                          <option value="no_show">Attendance: no-show</option>
+                        </select>
+
+                        <select
+                          aria-label="Chase status"
+                          disabled={busy}
+                          value={inv.chaseStatus}
+                          onChange={(e) =>
+                            patchInvitee(inv.id, { chaseStatus: e.target.value })
+                          }
+                          className="rounded-lg border border-border bg-surface-elevated px-2.5 py-1 text-xs"
+                        >
+                          <option value="none">Chase: none</option>
+                          <option value="invited">Chase: invited</option>
+                          <option value="chased_1">Chase: chased 1</option>
+                          <option value="chased_2">Chase: chased 2</option>
+                        </select>
+
+                        {inv.waitlistStatus === "waitlisted" &&
+                          ws.capacity.availableGuestPlaces > 0 && (
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() =>
+                                patchInvitee(inv.id, {
+                                  waitlistAction: "offer_place",
+                                })
+                              }
+                              className="rounded-lg bg-warning px-2.5 py-1 text-xs font-semibold text-black"
+                            >
+                              Offer Place
+                            </button>
+                          )}
+
+                        {inv.waitlistStatus === "offered_place" &&
+                          ws.capacity.availableGuestPlaces > 0 && (
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() =>
+                                patchInvitee(inv.id, {
+                                  waitlistAction: "confirm_replacement",
+                                })
+                              }
+                              className="rounded-lg bg-success px-2.5 py-1 text-xs font-semibold text-black"
+                            >
+                              Confirm Replacement
+                            </button>
+                          )}
+
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setExpandedInvId(isExpanded ? null : inv.id)
+                          }
+                          className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface-elevated px-2.5 py-1 text-xs text-muted hover:text-foreground"
+                        >
+                          Notes &amp; History
+                          {isExpanded ? (
+                            <ChevronUp className="h-3.5 w-3.5" />
+                          ) : (
+                            <ChevronDown className="h-3.5 w-3.5" />
+                          )}
+                        </button>
+                      </div>
+                    </div>
+
+                    {isExpanded && (
+                      <div className="border-t border-border pt-3 space-y-4">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                          <div className="space-y-1">
+                            <label className="text-[11px] text-muted block">
+                              Dietary Requirements (event-only)
+                            </label>
+                            <input
+                              type="text"
+                              value={notes.dietaryNotes}
+                              onChange={(e) =>
+                                setNoteEdits((prev) => ({
+                                  ...prev,
+                                  [inv.id]: {
+                                    ...notes,
+                                    dietaryNotes: e.target.value,
+                                  },
+                                }))
+                              }
+                              placeholder="e.g. Vegetarian"
+                              className="w-full rounded-lg border border-border bg-surface-elevated px-2.5 py-1.5 text-xs"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-[11px] text-muted block">
+                              Special Requests (event-only)
+                            </label>
+                            <input
+                              type="text"
+                              value={notes.specialRequests}
+                              onChange={(e) =>
+                                setNoteEdits((prev) => ({
+                                  ...prev,
+                                  [inv.id]: {
+                                    ...notes,
+                                    specialRequests: e.target.value,
+                                  },
+                                }))
+                              }
+                              placeholder="e.g. Quiet seat"
+                              className="w-full rounded-lg border border-border bg-surface-elevated px-2.5 py-1.5 text-xs"
+                            />
+                          </div>
+                          <div className="space-y-1">
+                            <label className="text-[11px] text-muted block">
+                              Timing / Early Departure (event-only)
+                            </label>
+                            <input
+                              type="text"
+                              value={notes.earlyDepartureNote}
+                              onChange={(e) =>
+                                setNoteEdits((prev) => ({
+                                  ...prev,
+                                  [inv.id]: {
+                                    ...notes,
+                                    earlyDepartureNote: e.target.value,
+                                  },
+                                }))
+                              }
+                              placeholder="e.g. Leaves 9:15am"
+                              className="w-full rounded-lg border border-border bg-surface-elevated px-2.5 py-1.5 text-xs"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => patchInvitee(inv.id, notes)}
+                              className="rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-accent-foreground"
+                            >
+                              Save Event Notes
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => draftApprovalMessage(inv)}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface-elevated px-3 py-1.5 text-xs hover:border-accent/50"
+                            >
+                              <MailPlus className="h-3.5 w-3.5 text-accent" />
+                              Queue Message Draft for Approval
+                            </button>
+                          </div>
+
+                          <button
+                            type="button"
+                            disabled={busy}
+                            onClick={() =>
+                              patchInvitee(inv.id, {
+                                contactSuppressed: !inv.person?.contactSuppressed,
+                              })
+                            }
+                            className="rounded-lg border border-danger/40 px-3 py-1.5 text-xs text-danger hover:bg-danger/10"
+                          >
+                            {inv.person?.contactSuppressed
+                              ? "Remove Do Not Contact Flag"
+                              : "Mark Do Not Contact"}
+                          </button>
+                        </div>
+
+                        {inv.history.length > 0 && (
+                          <div className="space-y-1.5 text-[11px] text-muted">
+                            <div className="flex items-center gap-1 text-foreground font-medium">
+                              <History className="h-3 w-3" />
+                              Status History
+                            </div>
+                            <ul className="space-y-1">
+                              {inv.history.map((h) => (
+                                <li key={h.id}>
+                                  {new Date(h.createdAt).toLocaleString("en-GB")} —{" "}
+                                  response: {h.previousResponseStatus ?? "—"} →{" "}
+                                  <strong className="text-foreground">
+                                    {h.newResponseStatus}
+                                  </strong>
+                                  , attendance: {h.previousAttendanceOutcome ?? "—"}{" "}
+                                  →{" "}
+                                  <strong className="text-foreground">
+                                    {h.newAttendanceOutcome}
+                                  </strong>
+                                  {h.newWaitlistStatus !== "none"
+                                    ? `, waitlist: ${h.newWaitlistStatus}`
+                                    : ""}
+                                  {h.note ? ` (${h.note})` : ""}
+                                </li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* TAB 2: Booking & Payments */}
+      {activeTab === "logistics" && (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            patchEvent(
+              {
+                venueName,
+                venueAddress,
+                bookingStatus,
+                bookingReference,
+                venueContact,
+                bookingDocsUrl,
+                logisticsOwnerUserId: logisticsOwnerUserId || null,
+                depositAmountPence: gbpStringToPence(depositGbp),
+                depositDueDate: depositDueDate
+                  ? new Date(depositDueDate).toISOString()
+                  : null,
+                depositInvoiceRef,
+                depositPaid,
+                balanceAmountPence: gbpStringToPence(balanceGbp),
+                balanceDueDate: balanceDueDate
+                  ? new Date(balanceDueDate).toISOString()
+                  : null,
+                balanceInvoiceRef,
+                balancePaid,
+              },
+              "Saved venue booking and payment obligations.",
+            );
+          }}
+          className="space-y-6"
+        >
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="rounded-xl border border-border bg-surface p-5 space-y-4">
+              <h2 className="text-sm font-semibold">Venue &amp; Booking</h2>
+              <div className="space-y-3 text-xs">
+                <div>
+                  <label className="text-muted block mb-1">Venue Name</label>
+                  <input
+                    type="text"
+                    value={venueName}
+                    onChange={(e) => setVenueName(e.target.value)}
+                    className="w-full rounded-lg border border-border bg-surface-elevated px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-muted block mb-1">Venue Address</label>
+                  <input
+                    type="text"
+                    value={venueAddress}
+                    onChange={(e) => setVenueAddress(e.target.value)}
+                    className="w-full rounded-lg border border-border bg-surface-elevated px-3 py-2 text-sm"
+                  />
+                </div>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-muted block mb-1">
+                      Booking Status
+                    </label>
+                    <select
+                      value={bookingStatus}
+                      onChange={(e) => setBookingStatus(e.target.value)}
+                      className="w-full rounded-lg border border-border bg-surface-elevated px-3 py-2 text-sm"
+                    >
+                      <option value="unconfirmed">unconfirmed</option>
+                      <option value="provisional_hold">provisional hold</option>
+                      <option value="confirmed">confirmed</option>
+                      <option value="cancelled">cancelled</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label className="text-muted block mb-1">
+                      Booking Reference
+                    </label>
+                    <input
+                      type="text"
+                      value={bookingReference}
+                      onChange={(e) => setBookingReference(e.target.value)}
+                      className="w-full rounded-lg border border-border bg-surface-elevated px-3 py-2 text-sm"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-muted block mb-1">Venue Contact</label>
+                  <input
+                    type="text"
+                    value={venueContact}
+                    onChange={(e) => setVenueContact(e.target.value)}
+                    placeholder="Events manager name / email / phone"
+                    className="w-full rounded-lg border border-border bg-surface-elevated px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-muted block mb-1">
+                    Confirmation / Contract Docs URL
+                  </label>
+                  <input
+                    type="url"
+                    value={bookingDocsUrl}
+                    onChange={(e) => setBookingDocsUrl(e.target.value)}
+                    placeholder="https://..."
+                    className="w-full rounded-lg border border-border bg-surface-elevated px-3 py-2 text-sm"
+                  />
+                </div>
+                <div>
+                  <label className="text-muted block mb-1">
+                    Founder Responsible for Logistics
+                  </label>
+                  <select
+                    value={logisticsOwnerUserId}
+                    onChange={(e) => setLogisticsOwnerUserId(e.target.value)}
+                    className="w-full rounded-lg border border-border bg-surface-elevated px-3 py-2 text-sm"
+                  >
+                    <option value="">Unassigned</option>
+                    {ws.founders.map((f) => (
+                      <option key={f.id} value={f.id}>
+                        {f.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-xl border border-border bg-surface p-5 space-y-4">
+              <div className="flex items-center justify-between">
+                <h2 className="text-sm font-semibold flex items-center gap-2">
+                  <CreditCard className="h-4 w-4 text-accent" />
+                  Payment Obligations (Tracking Only)
+                </h2>
+                <span className="text-[11px] text-muted">
+                  No payments executed here
+                </span>
+              </div>
+
+              <div className="rounded-lg border border-border bg-surface-elevated p-3.5 space-y-3 text-xs">
+                <p className="font-medium text-foreground">Deposit</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-muted block mb-1">Amount (£)</label>
+                    <input
+                      type="text"
+                      value={depositGbp}
+                      onChange={(e) => setDepositGbp(e.target.value)}
+                      placeholder="0.00"
+                      className="w-full rounded border border-border bg-background px-2.5 py-1.5 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-muted block mb-1">Due Date</label>
+                    <input
+                      type="date"
+                      value={depositDueDate}
+                      onChange={(e) => setDepositDueDate(e.target.value)}
+                      className="w-full rounded border border-border bg-background px-2.5 py-1.5 text-sm"
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <input
+                    type="text"
+                    value={depositInvoiceRef}
+                    onChange={(e) => setDepositInvoiceRef(e.target.value)}
+                    placeholder="Invoice / receipt ref"
+                    className="flex-1 rounded border border-border bg-background px-2.5 py-1.5 text-xs"
+                  />
+                  <label className="inline-flex items-center gap-1.5 font-medium">
+                    <input
+                      type="checkbox"
+                      checked={depositPaid}
+                      onChange={(e) => setDepositPaid(e.target.checked)}
+                    />
+                    Paid
+                  </label>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-border bg-surface-elevated p-3.5 space-y-3 text-xs">
+                <p className="font-medium text-foreground">Remaining Balance</p>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="text-muted block mb-1">Amount (£)</label>
+                    <input
+                      type="text"
+                      value={balanceGbp}
+                      onChange={(e) => setBalanceGbp(e.target.value)}
+                      placeholder="0.00"
+                      className="w-full rounded border border-border bg-background px-2.5 py-1.5 text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-muted block mb-1">Due Date</label>
+                    <input
+                      type="date"
+                      value={balanceDueDate}
+                      onChange={(e) => setBalanceDueDate(e.target.value)}
+                      className="w-full rounded border border-border bg-background px-2.5 py-1.5 text-sm"
+                    />
+                  </div>
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <input
+                    type="text"
+                    value={balanceInvoiceRef}
+                    onChange={(e) => setBalanceInvoiceRef(e.target.value)}
+                    placeholder="Invoice / receipt ref"
+                    className="flex-1 rounded border border-border bg-background px-2.5 py-1.5 text-xs"
+                  />
+                  <label className="inline-flex items-center gap-1.5 font-medium">
+                    <input
+                      type="checkbox"
+                      checked={balancePaid}
+                      onChange={(e) => setBalancePaid(e.target.checked)}
+                    />
+                    Paid
+                  </label>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <button
+            type="submit"
+            disabled={busy}
+            className="rounded-lg bg-accent px-5 py-2 text-xs font-semibold text-accent-foreground"
+          >
+            Save Booking &amp; Payments
+          </button>
+        </form>
+      )}
+
+      {/* TAB 3: Preread & Post-Event */}
+      {activeTab === "preread" && (
+        <div className="space-y-6">
+          <div className="rounded-xl border border-border bg-surface p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Sparkles className="h-4 w-4 text-accent" />
+                <h2 className="text-sm font-semibold">
+                  Claude Preread Workflow
+                </h2>
+              </div>
+              <button
+                type="button"
+                onClick={copyPrereadContext}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface-elevated px-3 py-1.5 text-xs font-medium hover:border-accent/50"
+              >
+                {copiedPreread ? (
+                  <>
+                    <Check className="h-3.5 w-3.5 text-success" /> Copied
+                    Markdown for Claude
+                  </>
+                ) : (
+                  <>
+                    <Copy className="h-3.5 w-3.5 text-accent" /> Copy Claude
+                    Preread Context
+                  </>
+                )}
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="text-muted block mb-1">
+                  Finished Preread Link (Google Doc / Notion / Claude)
+                </label>
+                <input
+                  type="url"
+                  value={prereadUrl}
+                  onChange={(e) => setPrereadUrl(e.target.value)}
+                  placeholder="https://..."
+                  className="w-full rounded-lg border border-border bg-surface-elevated px-3 py-2 text-sm"
+                />
+              </div>
+              <div>
+                <label className="text-muted block mb-1">
+                  Host Priorities / Room Context Notes for Claude
+                </label>
+                <textarea
+                  rows={3}
+                  value={prereadNotes}
+                  onChange={(e) => setPrereadNotes(e.target.value)}
+                  placeholder="Key themes, introductions to facilitate, hosting goals..."
+                  className="w-full rounded-lg border border-border bg-surface-elevated px-3 py-2 text-sm"
+                />
+              </div>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() =>
+                  patchEvent(
+                    { prereadUrl, prereadNotes },
+                    "Saved preread link and context notes.",
+                  )
+                }
+                className="rounded-lg bg-accent px-4 py-2 text-xs font-semibold text-accent-foreground"
+              >
+                Save Preread Details
+              </button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div className="rounded-xl border border-border bg-surface p-5 space-y-4">
+              <div>
+                <h2 className="text-sm font-semibold">
+                  Event-Level Feedback
+                </h2>
+                <p className="text-[11px] text-muted mt-0.5">
+                  Feedback on format, venue, and attendee mix stays here (never
+                  mixed into personal Folk records).
+                </p>
+              </div>
+
+              <form onSubmit={submitFeedback} className="space-y-2.5 text-xs">
+                <select
+                  value={fbCategory}
+                  onChange={(e) =>
+                    setFbCategory(
+                      e.target.value as
+                        | "event"
+                        | "format"
+                        | "venue"
+                        | "attendee_mix"
+                        | "content",
+                    )
+                  }
+                  className="w-full rounded-lg border border-border bg-surface-elevated px-3 py-2 text-xs"
+                >
+                  <option value="event">Overall Event</option>
+                  <option value="format">Format</option>
+                  <option value="venue">Venue</option>
+                  <option value="attendee_mix">Attendee Mix</option>
+                  <option value="content">Content / Discussion</option>
+                </select>
+                <textarea
+                  rows={2}
+                  required
+                  value={fbSummary}
+                  onChange={(e) => setFbSummary(e.target.value)}
+                  placeholder="Record feedback..."
+                  className="w-full rounded-lg border border-border bg-surface-elevated px-3 py-2 text-xs"
+                />
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="rounded-lg bg-accent px-3.5 py-1.5 text-xs font-semibold text-accent-foreground"
+                >
+                  Add Feedback
+                </button>
+              </form>
+
+              <ul className="space-y-2 text-xs">
+                {ws.feedback.map((fb) => (
+                  <li
+                    key={fb.id}
+                    className="rounded-lg border border-border bg-surface-elevated p-2.5"
+                  >
+                    <span className="font-mono text-accent">[{fb.category}]</span>{" "}
+                    {fb.summary}
+                  </li>
+                ))}
+              </ul>
+            </div>
+
+            <div className="rounded-xl border border-border bg-surface p-5 space-y-4">
+              <div>
+                <h2 className="text-sm font-semibold">
+                  Attendee Recommendations &amp; Referrals
+                </h2>
+                <p className="text-[11px] text-muted mt-0.5">
+                  Track suggested CMOs to research and invite to future
+                  breakfasts.
+                </p>
+              </div>
+
+              <form onSubmit={submitReferral} className="space-y-2.5 text-xs">
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    type="text"
+                    required
+                    value={refName}
+                    onChange={(e) => setRefName(e.target.value)}
+                    placeholder="Recommended name *"
+                    className="rounded-lg border border-border bg-surface-elevated px-2.5 py-1.5"
+                  />
+                  <input
+                    type="text"
+                    value={refCompany}
+                    onChange={(e) => setRefCompany(e.target.value)}
+                    placeholder="Company"
+                    className="rounded-lg border border-border bg-surface-elevated px-2.5 py-1.5"
+                  />
+                  <input
+                    type="text"
+                    value={refRole}
+                    onChange={(e) => setRefRole(e.target.value)}
+                    placeholder="Role / Title"
+                    className="rounded-lg border border-border bg-surface-elevated px-2.5 py-1.5"
+                  />
+                  <input
+                    type="email"
+                    value={refEmail}
+                    onChange={(e) => setRefEmail(e.target.value)}
+                    placeholder="Email (optional)"
+                    className="rounded-lg border border-border bg-surface-elevated px-2.5 py-1.5"
+                  />
+                </div>
+                <select
+                  value={refByPersonId}
+                  onChange={(e) => setRefByPersonId(e.target.value)}
+                  className="w-full rounded-lg border border-border bg-surface-elevated px-2.5 py-1.5"
+                >
+                  <option value="">Recommended by (optional)</option>
+                  {ws.invitations.map((inv) => (
+                    <option key={inv.id} value={inv.folkPersonLinkId}>
+                      {inv.person?.fullName ?? inv.folkPersonLinkId}
+                    </option>
+                  ))}
+                </select>
+                <input
+                  type="text"
+                  value={refNotes}
+                  onChange={(e) => setRefNotes(e.target.value)}
+                  placeholder="Context note"
+                  className="w-full rounded-lg border border-border bg-surface-elevated px-2.5 py-1.5"
+                />
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="rounded-lg bg-accent px-3.5 py-1.5 text-xs font-semibold text-accent-foreground"
+                >
+                  Capture Referral
+                </button>
+              </form>
+
+              <ul className="space-y-2 text-xs">
+                {ws.referrals.map((r) => (
+                  <li
+                    key={r.id}
+                    className="rounded-lg border border-border bg-surface-elevated p-2.5 flex items-center justify-between gap-2"
+                  >
+                    <div>
+                      <p className="font-medium text-foreground">
+                        {r.referredName}
+                        {r.referredCompany ? ` · ${r.referredCompany}` : ""}
+                      </p>
+                      <p className="text-muted">
+                        {[r.referredRole, r.referredEmail, r.notes]
+                          .filter(Boolean)
+                          .join(" · ")}
+                      </p>
+                    </div>
+                    <select
+                      value={r.status}
+                      onChange={async (e) => {
+                        await fetch(`/api/breakfasts/${ws.event.id}/referrals`, {
+                          method: "PATCH",
+                          headers: { "Content-Type": "application/json" },
+                          body: JSON.stringify({
+                            referralId: r.id,
+                            status: e.target.value,
+                          }),
+                        });
+                        await refreshWorkspace();
+                      }}
+                      className="rounded border border-border bg-background px-2 py-1 text-[11px]"
+                    >
+                      <option value="new">new</option>
+                      <option value="researching">researching</option>
+                      <option value="added_to_folk">added to Folk</option>
+                      <option value="invited">invited</option>
+                      <option value="dismissed">dismissed</option>
+                    </select>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Search & Add from Folk CRM */}
+      {showFolkModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-2xl rounded-2xl border border-border bg-surface p-6 space-y-4 max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-semibold">
+                Add Invitee from Folk CRM
+              </h2>
+              <button
+                type="button"
+                onClick={() => setShowFolkModal(false)}
+                className="text-muted hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                searchFolk(folkQuery);
+              }}
+              className="flex gap-2"
+            >
+              <div className="relative flex-1">
+                <Search className="h-4 w-4 text-muted absolute left-3 top-2.5" />
+                <input
+                  type="text"
+                  value={folkQuery}
+                  onChange={(e) => setFolkQuery(e.target.value)}
+                  placeholder="Search Folk by name, email, role, or company..."
+                  className="w-full rounded-lg border border-border bg-surface-elevated pl-9 pr-3 py-2 text-xs"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={searchingFolk}
+                className="rounded-lg bg-accent px-4 py-2 text-xs font-semibold text-accent-foreground"
+              >
+                {searchingFolk ? "Searching..." : "Search"}
+              </button>
+            </form>
+
+            {!folkConfigured ? (
+              <p className="text-xs text-warning">
+                FOLK_API_KEY is not configured.
+              </p>
+            ) : (
+              <div className="overflow-y-auto space-y-2 flex-1 pr-1">
+                {folkPeople.length === 0 ? (
+                  <p className="text-xs text-muted py-4 text-center">
+                    {searchingFolk
+                      ? "Loading Folk contacts..."
+                      : "No matching Folk contacts found."}
+                  </p>
+                ) : (
+                  folkPeople.map((p) => {
+                    const alreadyLinked = ws.invitations.some(
+                      (i) => i.person?.folkPersonId === p.folkPersonId,
+                    );
+                    return (
+                      <div
+                        key={p.folkPersonId}
+                        className="flex items-center justify-between gap-3 rounded-lg border border-border bg-surface-elevated p-3 text-xs"
+                      >
+                        <div>
+                          <p className="font-medium text-foreground">
+                            {p.fullName}
+                          </p>
+                          <p className="text-muted">
+                            {[p.jobTitle, p.companyName, p.email]
+                              .filter(Boolean)
+                              .join(" · ") || p.folkPersonId}
+                          </p>
+                        </div>
+                        <button
+                          type="button"
+                          disabled={busy || alreadyLinked}
+                          onClick={() => addFromFolk(p)}
+                          className="rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-accent-foreground disabled:opacity-40"
+                        >
+                          {alreadyLinked ? "On list" : "Add"}
+                        </button>
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Manual Carry-Forward */}
+      {showCarryModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-2xl rounded-2xl border border-border bg-surface p-6 space-y-4 max-h-[85vh] flex flex-col">
+            <div className="flex items-center justify-between">
+              <div>
+                <h2 className="text-base font-semibold">
+                  Manual Carry-Forward ({ws.event.locale})
+                </h2>
+                <p className="text-xs text-muted">
+                  Previous attendees and non-responders from earlier{" "}
+                  {ws.event.locale} breakfasts. Event-specific notes are never
+                  copied.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowCarryModal(false)}
+                className="text-muted hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <div className="overflow-y-auto space-y-2 flex-1 pr-1">
+              {ws.manualCarryForwardOptions.length === 0 ? (
+                <p className="text-xs text-muted py-4 text-center">
+                  No eligible prior {ws.event.locale} contacts available to
+                  carry forward.
+                </p>
+              ) : (
+                ws.manualCarryForwardOptions.map((opt) => {
+                  const alreadyAdded = existingPersonLinkIds.has(
+                    opt.folkPersonLinkId,
+                  );
+                  return (
+                    <div
+                      key={opt.folkPersonLinkId}
+                      className="flex items-center justify-between gap-3 rounded-lg border border-border bg-surface-elevated p-3 text-xs"
+                    >
+                      <div>
+                        <p className="font-medium text-foreground">
+                          {opt.fullName}
+                        </p>
+                        <p className="text-muted">
+                          {[opt.jobTitle, opt.companyName].filter(Boolean).join(" · ")}{" "}
+                          — from {opt.sourceEventTitle} (
+                          {opt.sourceResponseStatus} /{" "}
+                          {opt.sourceAttendanceOutcome})
+                        </p>
+                      </div>
+                      <button
+                        type="button"
+                        disabled={busy || alreadyAdded}
+                        onClick={() => addManualCarryForward(opt)}
+                        className="rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-accent-foreground disabled:opacity-40"
+                      >
+                        {alreadyAdded ? "Added" : "Add Provisional"}
+                      </button>
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

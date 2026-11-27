@@ -1,7 +1,13 @@
 import { redirect } from "next/navigation";
-import { CalendarDays } from "lucide-react";
 import { AppShell } from "@/components/app-shell";
+import {
+  BreakfastsListClient,
+  type BreakfastSummaryItem,
+} from "@/components/breakfasts/breakfasts-list-client";
+import { getDb, isDatabaseConfigured } from "@/db";
 import { getFounderAccessState } from "@/lib/auth";
+import { listBreakfastsSummary } from "@/lib/breakfasts/queries";
+import type { FounderOption } from "@/lib/founders";
 
 export const dynamic = "force-dynamic";
 
@@ -11,27 +17,45 @@ export default async function BreakfastsPage() {
   if (access.status === "forbidden") redirect("/access-denied");
   const founder = access.status === "authenticated" ? access.founder : null;
 
+  let dbReady = false;
+  let founders: FounderOption[] = [];
+  let events: BreakfastSummaryItem[] = [];
+  let queueCountsByLocale: Record<string, number> = {};
+
+  if (isDatabaseConfigured()) {
+    try {
+      const db = getDb();
+      const summary = await listBreakfastsSummary(db);
+      founders = summary.founders;
+      queueCountsByLocale = summary.queueCountsByLocale;
+      events = summary.events.map((ev) => ({
+        id: ev.id,
+        locale: ev.locale,
+        title: ev.title,
+        eventDate: ev.eventDate.toISOString(),
+        venueName: ev.venueName,
+        totalCapacity: ev.totalCapacity,
+        status: ev.status,
+        bookingStatus: ev.bookingStatus,
+        depositPaid: ev.depositPaid,
+        balancePaid: ev.balancePaid,
+        inviteeCount: ev.inviteeCount,
+        capacity: ev.capacity,
+      }));
+      dbReady = true;
+    } catch {
+      dbReady = false;
+    }
+  }
+
   return (
     <AppShell activePath="/breakfasts" founder={founder}>
-      <div className="space-y-4">
-        <div className="flex items-center gap-2">
-          <CalendarDays className="h-5 w-5 text-accent" />
-          <h1 className="text-2xl font-semibold tracking-tight">
-            CMO Breakfasts
-          </h1>
-        </div>
-        <div className="rounded-xl border border-border bg-surface p-6 text-sm text-muted space-y-2">
-          <p className="text-foreground font-medium">
-            Phase 2 Workspace (Schema ready in Postgres)
-          </p>
-          <p>
-            Will manage locale-based events (Exeter, Bristol, London),
-            host-aware capacity, booking/deposit obligations, manual waitlist
-            offers, event-scoped dietary/timing notes, same-locale automatic
-            carry-forward, Claude preread links, and post-event follow-ups.
-          </p>
-        </div>
-      </div>
+      <BreakfastsListClient
+        initialEvents={events}
+        founders={founders}
+        queueCountsByLocale={queueCountsByLocale}
+        dbReady={dbReady}
+      />
     </AppShell>
   );
 }

@@ -120,6 +120,7 @@ export const breakfastEvents = pgTable("breakfast_events", {
   title: text("title").notNull(),
   eventDate: timestamp("event_date", { withTimezone: true }).notNull(),
   venueName: text("venue_name"),
+  venueAddress: text("venue_address"),
   totalCapacity: integer("total_capacity").notNull().default(14),
   status: text("status")
     .$type<"planning" | "inviting" | "confirmed" | "completed" | "cancelled">()
@@ -131,12 +132,15 @@ export const breakfastEvents = pgTable("breakfast_events", {
   bookingDocsUrl: text("booking_docs_url"),
   depositAmountPence: integer("deposit_amount_pence"),
   depositDueDate: timestamp("deposit_due_date", { withTimezone: true }),
+  depositInvoiceRef: text("deposit_invoice_ref"),
   depositPaid: boolean("deposit_paid").notNull().default(false),
   balanceAmountPence: integer("balance_amount_pence"),
   balanceDueDate: timestamp("balance_due_date", { withTimezone: true }),
+  balanceInvoiceRef: text("balance_invoice_ref"),
   balancePaid: boolean("balance_paid").notNull().default(false),
   logisticsOwnerUserId: uuid("logistics_owner_user_id").references(() => users.id),
   prereadUrl: text("preread_url"),
+  prereadNotes: text("preread_notes"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
   updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
@@ -213,6 +217,72 @@ export const breakfastInvitationHistory = pgTable("breakfast_invitation_history"
   newWaitlistStatus: text("new_waitlist_status"),
   note: text("note"),
   createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const localeCarryForwardQueue = pgTable(
+  "locale_carry_forward_queue",
+  {
+    id: uuid("id").defaultRandom().primaryKey(),
+    locale: text("locale").notNull(),
+    folkPersonLinkId: uuid("folk_person_link_id")
+      .notNull()
+      .references(() => folkPeopleLink.id),
+    sourceEventId: uuid("source_event_id")
+      .notNull()
+      .references(() => breakfastEvents.id, { onDelete: "cascade" }),
+    reason: text("reason")
+      .$type<"responded_could_not_attend" | "manual_queue">()
+      .notNull()
+      .default("responded_could_not_attend"),
+    consumedByEventId: uuid("consumed_by_event_id").references(
+      () => breakfastEvents.id,
+      { onDelete: "set null" },
+    ),
+    createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => [
+    uniqueIndex("locale_carry_forward_queue_uidx").on(
+      table.locale,
+      table.folkPersonLinkId,
+      table.sourceEventId,
+    ),
+  ],
+);
+
+export const breakfastFeedback = pgTable("breakfast_feedback", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  eventId: uuid("event_id")
+    .notNull()
+    .references(() => breakfastEvents.id, { onDelete: "cascade" }),
+  recordedByUserId: uuid("recorded_by_user_id").references(() => users.id),
+  category: text("category")
+    .$type<"event" | "format" | "venue" | "attendee_mix" | "content">()
+    .notNull()
+    .default("event"),
+  summary: text("summary").notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+});
+
+export const breakfastReferrals = pgTable("breakfast_referrals", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  eventId: uuid("event_id")
+    .notNull()
+    .references(() => breakfastEvents.id, { onDelete: "cascade" }),
+  referredByFolkPersonLinkId: uuid("referred_by_folk_person_link_id").references(
+    () => folkPeopleLink.id,
+  ),
+  referredName: text("referred_name").notNull(),
+  referredCompany: text("referred_company"),
+  referredRole: text("referred_role"),
+  referredEmail: text("referred_email"),
+  status: text("status")
+    .$type<"new" | "researching" | "added_to_folk" | "invited" | "dismissed">()
+    .notNull()
+    .default("new"),
+  notes: text("notes"),
+  createdByUserId: uuid("created_by_user_id").references(() => users.id),
+  createdAt: timestamp("created_at", { withTimezone: true }).defaultNow().notNull(),
+  updatedAt: timestamp("updated_at", { withTimezone: true }).defaultNow().notNull(),
 });
 
 export const goldAccounts = pgTable("gold_accounts", {
