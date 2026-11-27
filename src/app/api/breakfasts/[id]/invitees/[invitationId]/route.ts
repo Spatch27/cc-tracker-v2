@@ -307,3 +307,68 @@ export async function PATCH(
     return errorResponse(err);
   }
 }
+
+export async function DELETE(
+  _request: Request,
+  context: { params: Promise<{ id: string; invitationId: string }> },
+) {
+  try {
+    const founder = await requireFounderSession();
+    if (!isDatabaseConfigured()) {
+      return Response.json(
+        { error: "Database is not configured" },
+        { status: 503 },
+      );
+    }
+
+    const { id: eventId, invitationId } = await context.params;
+    const db = getDb();
+
+    const [existing] = await db
+      .select()
+      .from(schema.breakfastInvitations)
+      .where(
+        and(
+          eq(schema.breakfastInvitations.id, invitationId),
+          eq(schema.breakfastInvitations.eventId, eventId),
+        ),
+      )
+      .limit(1);
+
+    if (!existing) {
+      return Response.json(
+        { error: "Invitation not found for this event" },
+        { status: 404 },
+      );
+    }
+
+    await db
+      .delete(schema.breakfastInvitations)
+      .where(
+        and(
+          eq(schema.breakfastInvitations.id, invitationId),
+          eq(schema.breakfastInvitations.eventId, eventId),
+        ),
+      );
+
+    await recordAuditEvent({
+      actorType: "human",
+      actorUserId: founder.userId,
+      action: "breakfast_invitee_removed",
+      entityType: "breakfast_invitation",
+      entityId: invitationId,
+      previousValue: {
+        eventId,
+        folkPersonLinkId: existing.folkPersonLinkId,
+        responseStatus: existing.responseStatus,
+        attendanceOutcome: existing.attendanceOutcome,
+        waitlistStatus: existing.waitlistStatus,
+      },
+      outcome: "succeeded",
+    });
+
+    return Response.json({ ok: true, deletedId: invitationId });
+  } catch (err) {
+    return errorResponse(err);
+  }
+}

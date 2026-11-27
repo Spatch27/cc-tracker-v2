@@ -17,6 +17,7 @@ import {
   MapPin,
   Search,
   Sparkles,
+  Trash2,
   UserPlus,
   X,
 } from "lucide-react";
@@ -354,6 +355,41 @@ export function BreakfastWorkspaceClient({
         text: `Carried forward ${opt.fullName} as provisional (zero event notes copied).`,
       });
       await refreshWorkspace();
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function removeInvitee(inv: SerializedInvitee) {
+    const label = inv.person?.fullName ?? "this invitee";
+    if (
+      !window.confirm(
+        `Remove ${label} from this breakfast list? Their Folk CRM contact will not be affected.`,
+      )
+    ) {
+      return;
+    }
+
+    setBusy(true);
+    setBanner(null);
+    try {
+      const res = await fetch(
+        `/api/breakfasts/${ws.event.id}/invitees/${inv.id}`,
+        { method: "DELETE" },
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setBanner({ kind: "error", text: data.error ?? "Failed to remove invitee" });
+        return;
+      }
+      setExpandedInvId(null);
+      setBanner({
+        kind: "info",
+        text: `Removed ${label} from this breakfast list (Folk CRM untouched).`,
+      });
+      await refreshWorkspace();
+    } catch {
+      setBanner({ kind: "error", text: "Network error removing invitee" });
     } finally {
       setBusy(false);
     }
@@ -1031,20 +1067,31 @@ export function BreakfastWorkspaceClient({
                             </button>
                           </div>
 
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() =>
-                              patchInvitee(inv.id, {
-                                contactSuppressed: !inv.person?.contactSuppressed,
-                              })
-                            }
-                            className="rounded-lg border border-danger/40 px-3 py-1.5 text-xs text-danger hover:bg-danger/10"
-                          >
-                            {inv.person?.contactSuppressed
-                              ? "Remove Do Not Contact Flag"
-                              : "Mark Do Not Contact"}
-                          </button>
+                          <div className="flex flex-wrap gap-2">
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() =>
+                                patchInvitee(inv.id, {
+                                  contactSuppressed: !inv.person?.contactSuppressed,
+                                })
+                              }
+                              className="rounded-lg border border-danger/40 px-3 py-1.5 text-xs text-danger hover:bg-danger/10"
+                            >
+                              {inv.person?.contactSuppressed
+                                ? "Remove Do Not Contact Flag"
+                                : "Mark Do Not Contact"}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => removeInvitee(inv)}
+                              className="inline-flex items-center gap-1.5 rounded-lg border border-danger/40 bg-danger/10 px-3 py-1.5 text-xs text-danger hover:bg-danger/20"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              Remove from Event
+                            </button>
+                          </div>
                         </div>
 
                         {inv.history.length > 0 && (
