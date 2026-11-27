@@ -58,61 +58,69 @@ async function syncFounderUserRecord(params: {
 }): Promise<string | null> {
   if (!isDatabaseConfigured()) return null;
 
-  const db = getDb();
-  const normalizedEmail = params.email.trim().toLowerCase();
+  try {
+    const db = getDb();
+    const normalizedEmail = params.email.trim().toLowerCase();
 
-  const existingByClerk = await db
-    .select()
-    .from(schema.users)
-    .where(eq(schema.users.clerkUserId, params.clerkUserId))
-    .limit(1);
+    const existingByClerk = await db
+      .select()
+      .from(schema.users)
+      .where(eq(schema.users.clerkUserId, params.clerkUserId))
+      .limit(1);
 
-  if (existingByClerk[0]) {
-    const row = existingByClerk[0];
-    if (row.email !== normalizedEmail || row.name !== params.name) {
+    if (existingByClerk[0]) {
+      const row = existingByClerk[0];
+      if (row.email !== normalizedEmail || row.name !== params.name) {
+        await db
+          .update(schema.users)
+          .set({
+            email: normalizedEmail,
+            name: params.name,
+            updatedAt: new Date(),
+          })
+          .where(eq(schema.users.id, row.id));
+      }
+      return row.id;
+    }
+
+    const existingByEmail = await db
+      .select()
+      .from(schema.users)
+      .where(eq(schema.users.email, normalizedEmail))
+      .limit(1);
+
+    if (existingByEmail[0]) {
+      const row = existingByEmail[0];
       await db
         .update(schema.users)
         .set({
-          email: normalizedEmail,
+          clerkUserId: params.clerkUserId,
           name: params.name,
           updatedAt: new Date(),
         })
         .where(eq(schema.users.id, row.id));
+      return row.id;
     }
-    return row.id;
-  }
 
-  const existingByEmail = await db
-    .select()
-    .from(schema.users)
-    .where(eq(schema.users.email, normalizedEmail))
-    .limit(1);
-
-  if (existingByEmail[0]) {
-    const row = existingByEmail[0];
-    await db
-      .update(schema.users)
-      .set({
+    const [created] = await db
+      .insert(schema.users)
+      .values({
         clerkUserId: params.clerkUserId,
+        email: normalizedEmail,
         name: params.name,
-        updatedAt: new Date(),
+        role: "admin",
+        isActive: true,
       })
-      .where(eq(schema.users.id, row.id));
-    return row.id;
+      .returning({ id: schema.users.id });
+
+    return created?.id ?? null;
+  } catch (err) {
+    console.error(
+      "syncFounderUserRecord skipped:",
+      err instanceof Error ? err.message : "Database unavailable",
+    );
+    return null;
   }
-
-  const [created] = await db
-    .insert(schema.users)
-    .values({
-      clerkUserId: params.clerkUserId,
-      email: normalizedEmail,
-      name: params.name,
-      role: "admin",
-      isActive: true,
-    })
-    .returning({ id: schema.users.id });
-
-  return created?.id ?? null;
 }
 
 export async function getFounderAccessState(): Promise<FounderAccessState> {
