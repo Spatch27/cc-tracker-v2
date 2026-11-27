@@ -131,6 +131,8 @@ export interface FolkListResponse<T> {
 export interface FolkListParams {
   limit?: number;
   cursor?: string;
+  combinator?: "and" | "or";
+  filters?: Record<string, string>;
 }
 
 export interface FolkInteractionListParams extends FolkListParams {

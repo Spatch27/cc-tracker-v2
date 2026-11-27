@@ -2,7 +2,7 @@ import { errorResponse } from "@/lib/api-auth";
 import { requireFounderSession } from "@/lib/auth";
 import {
   createFolkClientFromEnv,
-  listAllFolkPeople,
+  searchFolkPeople,
 } from "@/lib/folk/client";
 
 export const dynamic = "force-dynamic";
@@ -16,11 +16,9 @@ export async function GET(request: Request) {
     }
 
     const { searchParams } = new URL(request.url);
-    const query = (searchParams.get("q") ?? "").trim().toLowerCase();
+    const query = (searchParams.get("q") ?? "").trim();
 
-    const people = query
-      ? (await listAllFolkPeople(client, 25)).items
-      : (await client.listPeople({ limit: 100 })).items;
+    const { items: people, strategy } = await searchFolkPeople(client, query);
 
     const mapped = people.map((p) => {
       const fullName =
@@ -41,17 +39,19 @@ export async function GET(request: Request) {
       };
     });
 
-    const filtered = query
+    const lower = query.toLowerCase();
+    const filtered = lower
       ? mapped.filter((p) =>
           [p.fullName, p.email ?? "", p.jobTitle ?? "", p.companyName ?? ""]
             .join(" ")
             .toLowerCase()
-            .includes(query),
+            .includes(lower),
         )
       : mapped;
 
     return Response.json({
       folkConfigured: true,
+      searchStrategy: strategy,
       people: filtered.slice(0, 40),
     });
   } catch (err) {

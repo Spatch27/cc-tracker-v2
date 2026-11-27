@@ -265,6 +265,8 @@ export class FolkRestClient implements FolkClientInterface {
     const raw = await this.request<unknown>("GET", "/people", {
       limit: params?.limit,
       cursor: params?.cursor,
+      combinator: params?.combinator,
+      ...params?.filters,
     });
     return extractListEnvelope(raw, folkPersonSchema);
   }
@@ -378,7 +380,7 @@ export class FolkRestClient implements FolkClientInterface {
 
 export async function listAllFolkPeople(
   client: FolkClientInterface,
-  maxPages = 25,
+  maxPages = 40,
 ): Promise<{ items: FolkPerson[]; pagesFetched: number; truncated: boolean }> {
   const items: FolkPerson[] = [];
   let cursor: string | undefined;
@@ -403,6 +405,128 @@ export async function listAllFolkPeople(
   }
 
   return { items, pagesFetched, truncated };
+}
+
+function formatFolkPersonName(person: FolkPerson): string {
+  return (
+    person.fullName?.trim() ||
+    [person.firstName, person.lastName].filter(Boolean).join(" ").trim()
+  );
+}
+
+function matchesQueryLocally(person: FolkPerson, queryLower: string): boolean {
+  const haystack = [
+    formatFolkPersonName(person),
+    ...(person.emails ?? []),
+    person.jobTitle ?? "",
+    ...(person.companies ?? []).map((c) => c.name ?? ""),
+  ]
+    .join(" ")
+    .toLowerCase();
+  return haystack.includes(queryLower);
+}
+
+async function tryFolkPeopleFilter(
+  client: FolkClientInterface,
+  params: FolkListParams,
+): Promise<FolkPerson[]> {
+  try {
+    const res = await client.listPeople(params);
+    return res.items;
+  } catch (err) {
+    if (
+      err instanceof FolkApiError &&
+      (err.status === 400 || err.status === 422)
+    ) {
+      return [];
+    }
+    throw err;
+  }
+}
+
+/**
+ * Searches Folk CRM people using server-side Folk filters first (which search
+ * across the entire Folk workspace regardless of total record count), falling
+ * back to operator alternatives and paginated scanning if needed.
+ */
+export async function searchFolkPeople(
+  client: FolkClientInterface,
+  rawQuery: string,
+  options?: {
+    fallbackMaxPages?: number;
+    skipPaginatedFallback?: boolean;
+  },
+): Promise<{
+  items: FolkPerson[];
+  strategy: "server_filter" | "paginated_scan";
+}> {
+  const query = rawQuery.trim();
+  if (!query) {
+    const first = await client.listPeople({ limit: 100 });
+    return { items: first.items, strategy: "server_filter" };
+  }
+
+  const byId = new Map<string, FolkPerson>();
+  const addItems = (list: FolkPerson[]) => {
+    for (const p of list) {
+      if (!byId.has(p.id)) byId.set(p.id, p);
+    }
+  };
+
+  const tokens = query.split(/\s+/).filter(Boolean);
+  const surnameToken = tokens.length >= 2 ? tokens[tokens.length - 1] : null;
+  const firstToken = tokens.length >= 2 ? tokens[0] : null;
+
+  const filterAttempts: FolkListParams[] = [
+    {
+      limit: 50,
+      combinator: "or",
+      filters: {
+        "filter[fullName][like]": query,
+        "filter[lastName][like]": surnameToken ?? query,
+        "filter[emails][like]": query,
+      },
+    },
+    {
+      limit: 50,
+      combinator: "or",
+      filters: {
+        "filter[fullName][contains]": query,
+        "filter[lastName][eq]": surnameToken ?? query,
+      },
+    },
+  ];
+
+  if (surnameToken && firstToken) {
+    filterAttempts.push({
+      limit: 50,
+      combinator: "and",
+      filters: {
+        "filter[firstName][eq]": firstToken,
+        "filter[lastName][eq]": surnameToken,
+      },
+    });
+  }
+
+  for (const attempt of filterAttempts) {
+    const items = await tryFolkPeopleFilter(client, attempt);
+    addItems(items);
+    if (byId.size > 0) {
+      return { items: Array.from(byId.values()), strategy: "server_filter" };
+    }
+  }
+
+  if (options?.skipPaginatedFallback || options?.fallbackMaxPages === 0) {
+    return { items: [], strategy: "server_filter" };
+  }
+
+  const { items: allItems } = await listAllFolkPeople(
+    client,
+    options?.fallbackMaxPages ?? 60,
+  );
+  const lower = query.toLowerCase();
+  const filtered = allItems.filter((p) => matchesQueryLocally(p, lower));
+  return { items: filtered, strategy: "paginated_scan" };
 }
 
 export function createFolkClientFromEnv(): FolkRestClient | null {

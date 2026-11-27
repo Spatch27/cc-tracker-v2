@@ -5,7 +5,11 @@ import { errorResponse } from "@/lib/api-auth";
 import { requireFounderSession } from "@/lib/auth";
 import { matchBreakfastRowToFolk } from "@/lib/breakfasts/import-parser";
 import { normalizeLocale } from "@/lib/breakfasts/rules";
-import { createFolkClientFromEnv, listAllFolkPeople } from "@/lib/folk/client";
+import {
+  createFolkClientFromEnv,
+  listAllFolkPeople,
+  searchFolkPeople,
+} from "@/lib/folk/client";
 
 export const dynamic = "force-dynamic";
 
@@ -52,9 +56,9 @@ export async function POST(request: Request) {
     const body = previewSchema.parse(await request.json());
     const db = getDb();
 
-    const [{ items: folkPeople, pagesFetched, truncated }, events, personLinks, invitations] =
+    const [{ items: initialPeople, pagesFetched, truncated }, events, personLinks, invitations] =
       await Promise.all([
-        listAllFolkPeople(folkClient, 25),
+        listAllFolkPeople(folkClient, 30),
         db
           .select()
           .from(schema.breakfastEvents)
@@ -62,6 +66,52 @@ export async function POST(request: Request) {
         db.select().from(schema.folkPeopleLink),
         db.select().from(schema.breakfastInvitations),
       ]);
+
+    const peopleById = new Map(initialPeople.map((p) => [p.id, p]));
+
+    // Run targeted server-side Folk searches for any rows unmatched after initial paging,
+    // so contacts beyond the initial page cap (e.g. >3,000 workspace contacts) are still found.
+    const unmatchedNames = new Set<string>();
+    for (const block of body.blocks) {
+      for (const row of block.rows) {
+        const initialMatch = matchBreakfastRowToFolk(
+          {
+            rowNumber: row.rowNumber,
+            rawName: row.rawName,
+            companyHint: row.companyHint ?? null,
+            roleHint: row.roleHint ?? null,
+            notes: row.notes ?? null,
+          },
+          initialPeople,
+        );
+        if (initialMatch.status === "unmatched") {
+          const cleaned = row.rawName.replace(/\([^)]*\)/g, " ").replace(/\s+/g, " ").trim();
+          if (cleaned) unmatchedNames.add(cleaned);
+        }
+      }
+    }
+
+    const targetedTargets = Array.from(unmatchedNames).slice(0, 45);
+    const BATCH_SIZE = 5;
+    for (let i = 0; i < targetedTargets.length; i += BATCH_SIZE) {
+      const batch = targetedTargets.slice(i, i + BATCH_SIZE);
+      const batchResults = await Promise.all(
+        batch.map((name) =>
+          searchFolkPeople(folkClient, name, { skipPaginatedFallback: true }).catch(
+            () => ({ items: [], strategy: "server_filter" as const }),
+          ),
+        ),
+      );
+      for (const res of batchResults) {
+        for (const p of res.items) {
+          if (!peopleById.has(p.id)) {
+            peopleById.set(p.id, p);
+          }
+        }
+      }
+    }
+
+    const folkPeople = Array.from(peopleById.values());
 
     const folkIdByLinkId = new Map(personLinks.map((p) => [p.id, p.folkPersonId]));
     const suppressedFolkIds = new Set(

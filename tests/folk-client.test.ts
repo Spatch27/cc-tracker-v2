@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest";
-import { FolkApiError, FolkRestClient } from "@/lib/folk/client";
+import {
+  FolkApiError,
+  FolkRestClient,
+  searchFolkPeople,
+} from "@/lib/folk/client";
 
 describe("FolkRestClient", () => {
   it("sends Authorization Bearer header and parses cursor pagination", async () => {
@@ -112,5 +116,45 @@ describe("FolkRestClient", () => {
     );
     expect(requestedUrls[1]).toContain("entity.id=per_456");
     expect(requestedUrls[1]).toContain("importedTypes=email");
+  });
+
+  it("forwards filter params on listPeople and resolves searches via server-side filters", async () => {
+    const requestedUrls: string[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const urlStr = String(input);
+      requestedUrls.push(urlStr);
+      if (urlStr.includes("filter%5BfullName%5D%5Blike%5D")) {
+        return new Response("Unsupported operator", { status: 422 });
+      }
+      return new Response(
+        JSON.stringify({
+          data: {
+            items: [
+              {
+                id: "per_target",
+                fullName: "Taylor Morgan",
+                emails: ["taylor@ferry.test"],
+                companies: [{ id: "cmp_1", name: "Channel Ferries" }],
+              },
+            ],
+            pagination: {},
+          },
+        }),
+        { status: 200 },
+      );
+    });
+
+    const client = new FolkRestClient({
+      apiKey: "test-secret",
+      fetchFn: fetchMock as unknown as typeof fetch,
+      baseDelayMs: 1,
+    });
+
+    const result = await searchFolkPeople(client, "Taylor Morgan");
+    expect(result.strategy).toBe("server_filter");
+    expect(result.items).toHaveLength(1);
+    expect(result.items[0]?.id).toBe("per_target");
+    expect(requestedUrls[0]).toContain("combinator=or");
+    expect(requestedUrls[1]).toContain("filter%5BfullName%5D%5Bcontains%5D=Taylor+Morgan");
   });
 });
