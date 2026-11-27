@@ -742,7 +742,11 @@ export function ReviewsClient({
                             onClick={() => handleDecision(p, "approve_and_apply")}
                             className="inline-flex items-center gap-1 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-accent-foreground hover:opacity-90"
                           >
-                            Approve &amp; Apply
+                            {isCreatePerson
+                              ? "Approve & Add to Folk"
+                              : p.targetSystem === "folk"
+                                ? "Approve & Apply to Folk"
+                                : "Approve & Apply"}
                           </button>
                         </>
                       )}
@@ -754,7 +758,7 @@ export function ReviewsClient({
                           onClick={() => handleDecision(p, "apply")}
                           className="inline-flex items-center gap-1 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-accent-foreground hover:opacity-90"
                         >
-                          Apply Now
+                          {isCreatePerson ? "Add to Folk Now" : "Apply Now"}
                         </button>
                       )}
 
@@ -814,7 +818,7 @@ export function ReviewsClient({
             </div>
             <p className="text-xs text-muted">
               Adds a pending proposal in the Review Queue. Nothing is created in
-              Folk until a founder clicks Approve &amp; Apply.
+              Folk until a founder clicks Approve &amp; Add to Folk.
             </p>
             <form onSubmit={handleCreateMissingContact} className="space-y-3">
               <div className="space-y-1">
