@@ -15,6 +15,7 @@ import {
   History,
   MailPlus,
   MapPin,
+  Pencil,
   Search,
   Sparkles,
   Trash2,
@@ -148,6 +149,13 @@ function formatDateInput(iso: string | null): string {
   return iso.slice(0, 10);
 }
 
+function formatDateTimeLocalInput(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
 export function BreakfastWorkspaceClient({
   initialWorkspace,
   currentFounderUserId,
@@ -166,6 +174,18 @@ export function BreakfastWorkspaceClient({
     text: string;
   } | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // Edit event details modal
+  const [showEditModal, setShowEditModal] = useState(false);
+  const [editTitle, setEditTitle] = useState(ws.event.title);
+  const [editLocale, setEditLocale] = useState(ws.event.locale);
+  const [editEventDate, setEditEventDate] = useState(() =>
+    formatDateTimeLocalInput(ws.event.eventDate),
+  );
+  const [editVenueName, setEditVenueName] = useState(ws.event.venueName ?? "");
+  const [editTotalCapacity, setEditTotalCapacity] = useState(
+    ws.event.totalCapacity,
+  );
 
   // Folk search modal
   const [showFolkModal, setShowFolkModal] = useState(false);
@@ -622,7 +642,7 @@ export function BreakfastWorkspaceClient({
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <label className="text-xs text-muted">Status:</label>
           <select
             value={ws.event.status}
@@ -636,6 +656,23 @@ export function BreakfastWorkspaceClient({
             <option value="completed">completed</option>
             <option value="cancelled">cancelled</option>
           </select>
+
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => {
+              setEditTitle(ws.event.title);
+              setEditLocale(ws.event.locale);
+              setEditEventDate(formatDateTimeLocalInput(ws.event.eventDate));
+              setEditVenueName(ws.event.venueName ?? "");
+              setEditTotalCapacity(ws.event.totalCapacity);
+              setShowEditModal(true);
+            }}
+            className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface-elevated px-3 py-1.5 text-xs font-medium text-foreground hover:border-accent/60"
+          >
+            <Pencil className="h-3.5 w-3.5 text-accent" />
+            Edit Details
+          </button>
 
           <button
             type="button"
@@ -698,6 +735,7 @@ export function BreakfastWorkspaceClient({
           <div className="rounded-lg bg-surface-elevated border border-border p-3">
             <span className="text-muted block">Room Capacity</span>
             <input
+              key={ws.event.totalCapacity}
               type="number"
               min={2}
               max={100}
@@ -1807,6 +1845,127 @@ export function BreakfastWorkspaceClient({
                 })
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: Edit Breakfast Details */}
+      {showEditModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4">
+          <div className="w-full max-w-lg rounded-2xl border border-border bg-surface p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h2 className="text-base font-semibold">
+                Edit Breakfast Details
+              </h2>
+              <button
+                type="button"
+                onClick={() => setShowEditModal(false)}
+                className="text-muted hover:text-foreground"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                await patchEvent(
+                  {
+                    title: editTitle,
+                    locale: editLocale,
+                    eventDate: new Date(editEventDate).toISOString(),
+                    venueName: editVenueName.trim() || null,
+                    totalCapacity: Number(editTotalCapacity),
+                  },
+                  "Updated breakfast details.",
+                );
+                setVenueName(editVenueName);
+                setShowEditModal(false);
+              }}
+              className="space-y-4 text-xs"
+            >
+              <div>
+                <label className="text-muted block mb-1">Event Title</label>
+                <input
+                  type="text"
+                  required
+                  value={editTitle}
+                  onChange={(e) => setEditTitle(e.target.value)}
+                  className="w-full rounded-lg border border-border bg-surface-elevated px-3 py-2 text-sm text-foreground"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-muted block mb-1">Locale</label>
+                  <input
+                    type="text"
+                    required
+                    value={editLocale}
+                    onChange={(e) => setEditLocale(e.target.value)}
+                    className="w-full rounded-lg border border-border bg-surface-elevated px-3 py-2 text-sm text-foreground"
+                  />
+                </div>
+                <div>
+                  <label className="text-muted block mb-1">
+                    Total Room Capacity (incl. hosts)
+                  </label>
+                  <input
+                    type="number"
+                    min={2}
+                    max={100}
+                    required
+                    value={editTotalCapacity}
+                    onChange={(e) =>
+                      setEditTotalCapacity(Number(e.target.value))
+                    }
+                    className="w-full rounded-lg border border-border bg-surface-elevated px-3 py-2 text-sm text-foreground"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-muted block mb-1">
+                    Date &amp; Start Time
+                  </label>
+                  <input
+                    type="datetime-local"
+                    required
+                    value={editEventDate}
+                    onChange={(e) => setEditEventDate(e.target.value)}
+                    className="w-full rounded-lg border border-border bg-surface-elevated px-3 py-2 text-sm text-foreground"
+                  />
+                </div>
+                <div>
+                  <label className="text-muted block mb-1">Venue Name</label>
+                  <input
+                    type="text"
+                    value={editVenueName}
+                    onChange={(e) => setEditVenueName(e.target.value)}
+                    placeholder="e.g. The Ned"
+                    className="w-full rounded-lg border border-border bg-surface-elevated px-3 py-2 text-sm text-foreground"
+                  />
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setShowEditModal(false)}
+                  className="rounded-lg border border-border px-4 py-2 text-xs text-muted hover:text-foreground"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={busy}
+                  className="rounded-lg bg-accent px-4 py-2 text-xs font-semibold text-accent-foreground disabled:opacity-40"
+                >
+                  {busy ? "Saving..." : "Save Changes"}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}
