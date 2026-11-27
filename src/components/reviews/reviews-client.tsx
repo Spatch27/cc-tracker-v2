@@ -9,12 +9,24 @@ import {
   ClipboardCheck,
   Edit3,
   ExternalLink,
+  Link2,
   Plus,
   RefreshCw,
+  Search,
   ShieldAlert,
   UserPlus,
   X,
 } from "lucide-react";
+
+interface ExistingFolkPersonOption {
+  folkPersonId: string;
+  fullName: string;
+  email: string | null;
+  jobTitle: string | null;
+  folkCompanyId: string | null;
+  companyName: string | null;
+  linkedinUrl: string | null;
+}
 
 export interface SerializedProposal {
   id: string;
@@ -106,6 +118,14 @@ export function ReviewsClient({
   const [editSummary, setEditSummary] = useState("");
   const [editChangesText, setEditChangesText] = useState("");
   const [reviewNotes, setReviewNotes] = useState<Record<string, string>>({});
+
+  // Pick existing Folk record state
+  const [linkingProposalId, setLinkingProposalId] = useState<string | null>(null);
+  const [folkSearchQuery, setFolkSearchQuery] = useState("");
+  const [folkSearchLoading, setFolkSearchLoading] = useState(false);
+  const [folkSearchResults, setFolkSearchResults] = useState<
+    ExistingFolkPersonOption[]
+  >([]);
 
   // Create new Folk person / proposal modal
   const [showNewModal, setShowNewModal] = useState(false);
@@ -253,9 +273,87 @@ export function ReviewsClient({
   }
 
   function startEdit(proposal: SerializedProposal) {
+    setLinkingProposalId(null);
     setEditingId(proposal.id);
     setEditSummary(proposal.summary);
     setEditChangesText(JSON.stringify(proposal.proposedChangesJson, null, 2));
+  }
+
+  async function searchExistingFolk(queryText: string) {
+    setError(null);
+    setFolkSearchLoading(true);
+    try {
+      const res = await fetch(
+        `/api/folk/people?q=${encodeURIComponent(queryText.trim())}`,
+      );
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error ?? "Failed to search Folk contacts");
+        return;
+      }
+      setFolkSearchResults(data.people ?? []);
+    } catch {
+      setError("Network error searching Folk contacts");
+    } finally {
+      setFolkSearchLoading(false);
+    }
+  }
+
+  async function openLinkExistingPicker(proposal: SerializedProposal) {
+    if (linkingProposalId === proposal.id) {
+      setLinkingProposalId(null);
+      return;
+    }
+    setEditingId(null);
+    setLinkingProposalId(proposal.id);
+    const rawName =
+      typeof proposal.proposedChangesJson.fullName === "string"
+        ? proposal.proposedChangesJson.fullName.trim()
+        : "";
+    const tokens = rawName.split(/\s+/).filter(Boolean);
+    const defaultQuery =
+      tokens.length >= 2 ? tokens[tokens.length - 1] : rawName;
+    setFolkSearchQuery(defaultQuery);
+    setFolkSearchResults([]);
+    await searchExistingFolk(defaultQuery);
+  }
+
+  async function handleLinkExistingFolk(
+    proposal: SerializedProposal,
+    person: ExistingFolkPersonOption,
+  ) {
+    setError(null);
+    setNotice(null);
+    setBusyId(proposal.id);
+    try {
+      const res = await fetch(`/api/proposals/${proposal.id}/review`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          decision: "link_existing_folk_person",
+          expectedPayloadHash: proposal.payloadHash,
+          reviewNote: reviewNotes[proposal.id] || null,
+          existingFolkPerson: person,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error ?? "Failed to link existing Folk record");
+        return;
+      }
+      if (data.proposal) {
+        updateProposalInList(data.proposal);
+      }
+      setLinkingProposalId(null);
+      setNotice(
+        `Linked to existing Folk contact ${person.fullName} (and added to target breakfast if attached).`,
+      );
+      router.refresh();
+    } catch {
+      setError("Network error linking existing Folk contact");
+    } finally {
+      setBusyId(null);
+    }
   }
 
   async function handleSaveEdit(proposalId: string) {
@@ -727,15 +825,28 @@ export function ReviewsClient({
 
                       {p.status === "pending_review" && (
                         <>
-                          <button
-                            type="button"
-                            disabled={busyId === p.id}
-                            onClick={() => handleDecision(p, "approve")}
-                            className="inline-flex items-center gap-1 rounded-lg border border-accent/40 bg-accent/15 px-3 py-1.5 text-xs font-medium text-accent hover:bg-accent/25"
-                          >
-                            <Check className="h-3 w-3" />
-                            Approve
-                          </button>
+                          {!isCreatePerson && (
+                            <button
+                              type="button"
+                              disabled={busyId === p.id}
+                              onClick={() => handleDecision(p, "approve")}
+                              className="inline-flex items-center gap-1 rounded-lg border border-accent/40 bg-accent/15 px-3 py-1.5 text-xs font-medium text-accent hover:bg-accent/25"
+                            >
+                              <Check className="h-3 w-3" />
+                              Approve
+                            </button>
+                          )}
+                          {isCreatePerson && folkConfigured && (
+                            <button
+                              type="button"
+                              disabled={busyId === p.id}
+                              onClick={() => openLinkExistingPicker(p)}
+                              className="inline-flex items-center gap-1 rounded-lg border border-accent/40 bg-accent/10 px-3 py-1.5 text-xs font-medium text-accent hover:bg-accent/20"
+                            >
+                              <Link2 className="h-3 w-3" />
+                              Pick Existing Folk Record
+                            </button>
+                          )}
                           <button
                             type="button"
                             disabled={busyId === p.id}
@@ -787,6 +898,92 @@ export function ReviewsClient({
                           : "Reject"}
                       </button>
                     </div>
+                  </div>
+                )}
+
+                {linkingProposalId === p.id && (
+                  <div className="rounded-lg border border-accent/40 bg-surface-elevated p-4 space-y-3">
+                    <div className="flex items-center justify-between gap-2">
+                      <p className="text-xs font-semibold text-foreground">
+                        Link to an Existing Folk Record (adds them to the breakfast
+                        without creating a duplicate in Folk)
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setLinkingProposalId(null)}
+                        className="text-muted hover:text-foreground"
+                      >
+                        <X className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={folkSearchQuery}
+                        onChange={(e) => setFolkSearchQuery(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter") {
+                            e.preventDefault();
+                            void searchExistingFolk(folkSearchQuery);
+                          }
+                        }}
+                        placeholder="Search Folk by name, email, or company..."
+                        className="flex-1 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs text-foreground"
+                      />
+                      <button
+                        type="button"
+                        disabled={folkSearchLoading}
+                        onClick={() => searchExistingFolk(folkSearchQuery)}
+                        className="inline-flex items-center gap-1 rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-accent-foreground disabled:opacity-40"
+                      >
+                        <Search className="h-3 w-3" />
+                        {folkSearchLoading ? "Searching..." : "Search Folk"}
+                      </button>
+                    </div>
+
+                    {folkSearchLoading ? (
+                      <p className="text-xs text-muted">
+                        Searching your Folk CRM contacts...
+                      </p>
+                    ) : folkSearchResults.length === 0 ? (
+                      <p className="text-xs text-muted">
+                        No Folk contacts matched &ldquo;{folkSearchQuery}&rdquo;. Try a
+                        shorter name, company, or click{" "}
+                        <strong>Approve &amp; Add to Folk</strong> above.
+                      </p>
+                    ) : (
+                      <div className="max-h-56 overflow-y-auto divide-y divide-border rounded-lg border border-border bg-surface">
+                        {folkSearchResults.map((person) => (
+                          <div
+                            key={person.folkPersonId}
+                            className="flex items-center justify-between gap-3 px-3 py-2 text-xs"
+                          >
+                            <div className="min-w-0">
+                              <p className="font-medium text-foreground truncate">
+                                {person.fullName}
+                                {person.companyName
+                                  ? ` — ${person.companyName}`
+                                  : ""}
+                              </p>
+                              <p className="text-[11px] text-muted truncate">
+                                {[person.jobTitle, person.email]
+                                  .filter(Boolean)
+                                  .join(" · ") || person.folkPersonId}
+                              </p>
+                            </div>
+                            <button
+                              type="button"
+                              disabled={busyId === p.id}
+                              onClick={() => handleLinkExistingFolk(p, person)}
+                              className="shrink-0 rounded-md border border-accent/40 bg-accent/15 px-2.5 py-1 text-[11px] font-medium text-accent hover:bg-accent/25"
+                            >
+                              Link This Contact
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
 

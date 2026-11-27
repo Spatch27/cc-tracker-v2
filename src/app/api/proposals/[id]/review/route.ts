@@ -25,12 +25,24 @@ const reviewSchema = z.object({
     "apply",
     "resolve_conflict_apply",
     "accept_live_folk_to_tracker",
+    "link_existing_folk_person",
   ]),
   expectedPayloadHash: z.string().optional(),
   reviewNote: z.string().nullable().optional(),
   idempotencyKey: z.string().optional(),
   resolvedChangesJson: z.record(z.unknown()).optional(),
   refreshedBaseSnapshotJson: z.record(z.unknown()).optional(),
+  existingFolkPerson: z
+    .object({
+      folkPersonId: z.string().min(1),
+      fullName: z.string().min(1),
+      email: z.string().nullable().optional(),
+      jobTitle: z.string().nullable().optional(),
+      folkCompanyId: z.string().nullable().optional(),
+      companyName: z.string().nullable().optional(),
+      linkedinUrl: z.string().nullable().optional(),
+    })
+    .optional(),
 });
 
 const UUID_REGEX =
@@ -160,6 +172,152 @@ export async function POST(
       });
 
       return Response.json({ proposal });
+    }
+
+    if (body.decision === "link_existing_folk_person") {
+      if (!body.existingFolkPerson) {
+        return Response.json(
+          { error: "existingFolkPerson details are required to link an existing Folk record" },
+          { status: 400 },
+        );
+      }
+
+      const existing = await store.getById(id);
+      if (!existing) {
+        return Response.json({ error: "Proposal not found" }, { status: 404 });
+      }
+      if (existing.status !== "pending_review" && existing.status !== "approved") {
+        return Response.json(
+          { error: `Cannot link existing Folk record from status '${existing.status}'` },
+          { status: 409 },
+        );
+      }
+
+      const db = getDb();
+      const picked = body.existingFolkPerson;
+
+      let folkCompanyLinkId: string | null = null;
+      if (picked.folkCompanyId && picked.companyName) {
+        const [companyRow] = await db
+          .insert(schema.folkCompaniesLink)
+          .values({
+            folkCompanyId: picked.folkCompanyId,
+            name: picked.companyName,
+            lastSyncedAt: new Date(),
+            syncStatus: "linked",
+          })
+          .onConflictDoUpdate({
+            target: schema.folkCompaniesLink.folkCompanyId,
+            set: {
+              name: picked.companyName,
+              lastSyncedAt: new Date(),
+              updatedAt: new Date(),
+            },
+          })
+          .returning({ id: schema.folkCompaniesLink.id });
+        folkCompanyLinkId = companyRow?.id ?? null;
+      }
+
+      const [personLink] = await db
+        .insert(schema.folkPeopleLink)
+        .values({
+          folkPersonId: picked.folkPersonId,
+          folkCompanyLinkId,
+          fullName: picked.fullName,
+          email: picked.email ?? null,
+          jobTitle: picked.jobTitle ?? null,
+          linkedinUrl: picked.linkedinUrl ?? null,
+          lastSyncedAt: new Date(),
+          syncStatus: "linked",
+        })
+        .onConflictDoUpdate({
+          target: schema.folkPeopleLink.folkPersonId,
+          set: {
+            ...(folkCompanyLinkId ? { folkCompanyLinkId } : {}),
+            fullName: picked.fullName,
+            email: picked.email ?? null,
+            jobTitle: picked.jobTitle ?? null,
+            linkedinUrl: picked.linkedinUrl ?? null,
+            lastSyncedAt: new Date(),
+            updatedAt: new Date(),
+          },
+        })
+        .returning();
+
+      if (personLink.contactSuppressed) {
+        return Response.json(
+          {
+            error: `${personLink.fullName} is marked Do Not Contact and cannot be added to an invite list.`,
+          },
+          { status: 409 },
+        );
+      }
+
+      const targetEventId =
+        typeof existing.proposedChangesJson._targetBreakfastEventId === "string" &&
+        UUID_REGEX.test(existing.proposedChangesJson._targetBreakfastEventId)
+          ? existing.proposedChangesJson._targetBreakfastEventId
+          : null;
+
+      if (targetEventId) {
+        const [insertedInvite] = await db
+          .insert(schema.breakfastInvitations)
+          .values({
+            eventId: targetEventId,
+            folkPersonLinkId: personLink.id,
+            responseStatus: "provisional",
+            attendanceOutcome: "pending",
+            waitlistStatus: "none",
+            chaseStatus: "none",
+          })
+          .onConflictDoNothing()
+          .returning();
+
+        if (insertedInvite) {
+          await db.insert(schema.breakfastInvitationHistory).values({
+            invitationId: insertedInvite.id,
+            changedByUserId: founder.userId,
+            previousResponseStatus: null,
+            newResponseStatus: insertedInvite.responseStatus,
+            previousAttendanceOutcome: null,
+            newAttendanceOutcome: insertedInvite.attendanceOutcome,
+            previousWaitlistStatus: null,
+            newWaitlistStatus: insertedInvite.waitlistStatus,
+            note: "Linked to existing Folk record from Review Queue",
+          });
+        }
+      }
+
+      const applied = await store.update(existing.id, {
+        status: "applied",
+        folkRecordId: picked.folkPersonId,
+        reviewedByUserId: founder.userId,
+        reviewedAt: new Date(),
+        appliedAt: new Date(),
+        reviewNote:
+          body.reviewNote || `Linked to existing Folk record: ${picked.fullName}`,
+        applyError: null,
+      });
+
+      await recordAuditEvent({
+        actorType: "human",
+        actorUserId: founder.userId,
+        action: "proposal_linked_existing_folk",
+        entityType: "change_proposal",
+        entityId: applied.id,
+        newValue: {
+          folkPersonId: picked.folkPersonId,
+          fullName: picked.fullName,
+          targetEventId,
+        },
+        outcome: "succeeded",
+      });
+
+      return Response.json({
+        proposal: applied,
+        outcome: "applied",
+        linkedFolkId: picked.folkPersonId,
+      });
     }
 
     if (body.decision === "accept_live_folk_to_tracker") {

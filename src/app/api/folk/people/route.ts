@@ -1,6 +1,9 @@
 import { errorResponse } from "@/lib/api-auth";
 import { requireFounderSession } from "@/lib/auth";
-import { createFolkClientFromEnv } from "@/lib/folk/client";
+import {
+  createFolkClientFromEnv,
+  listAllFolkPeople,
+} from "@/lib/folk/client";
 
 export const dynamic = "force-dynamic";
 
@@ -15,8 +18,11 @@ export async function GET(request: Request) {
     const { searchParams } = new URL(request.url);
     const query = (searchParams.get("q") ?? "").trim().toLowerCase();
 
-    const response = await client.listPeople({ limit: 100 });
-    const mapped = response.items.map((p) => {
+    const people = query
+      ? (await listAllFolkPeople(client, 25)).items
+      : (await client.listPeople({ limit: 100 })).items;
+
+    const mapped = people.map((p) => {
       const fullName =
         p.fullName?.trim() ||
         [p.firstName, p.lastName].filter(Boolean).join(" ").trim() ||
