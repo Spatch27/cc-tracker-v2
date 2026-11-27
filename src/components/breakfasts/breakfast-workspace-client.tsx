@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -156,6 +156,86 @@ function formatDateTimeLocalInput(iso: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+const RESPONSE_LABELS: Record<SerializedInvitee["responseStatus"], string> = {
+  provisional: "Not invited yet",
+  no_response: "Invited (no reply)",
+  accepted: "Accepted",
+  maybe: "Maybe",
+  declined: "Declined",
+};
+
+const ATTENDANCE_LABELS: Record<SerializedInvitee["attendanceOutcome"], string> = {
+  pending: "Upcoming",
+  attended: "Attended",
+  cancelled_in_advance: "Cancelled",
+  no_show: "No-show",
+};
+
+const CHASE_LABELS: Record<string, string> = {
+  none: "Not chased",
+  invited: "Invite sent",
+  chased_1: "Chased (1st)",
+  chased_2: "Chased (2nd)",
+};
+
+function responseSelectTone(status: SerializedInvitee["responseStatus"]): string {
+  switch (status) {
+    case "accepted":
+      return "border-success/40 text-success";
+    case "declined":
+      return "border-danger/40 text-danger";
+    case "maybe":
+      return "border-warning/40 text-warning";
+    case "no_response":
+      return "border-accent/40 text-accent";
+    default:
+      return "border-border text-muted";
+  }
+}
+
+function matchesInviteFilter(inv: SerializedInvitee, filter: string): boolean {
+  if (filter === "all") return true;
+  if (filter === "confirmed") {
+    return (
+      inv.attendanceOutcome !== "cancelled_in_advance" &&
+      inv.attendanceOutcome !== "no_show" &&
+      ((inv.responseStatus === "accepted" && inv.waitlistStatus === "none") ||
+        inv.waitlistStatus === "confirmed_replacement")
+    );
+  }
+  if (filter === "waitlist") {
+    return (
+      inv.waitlistStatus === "waitlisted" ||
+      inv.waitlistStatus === "offered_place"
+    );
+  }
+  if (filter === "cancelled_noshow") {
+    return (
+      inv.attendanceOutcome === "cancelled_in_advance" ||
+      inv.attendanceOutcome === "no_show"
+    );
+  }
+  return inv.responseStatus === filter;
+}
+
+function invitePriorityRank(inv: SerializedInvitee): number {
+  if (
+    inv.attendanceOutcome !== "cancelled_in_advance" &&
+    inv.attendanceOutcome !== "no_show" &&
+    ((inv.responseStatus === "accepted" && inv.waitlistStatus === "none") ||
+      inv.waitlistStatus === "confirmed_replacement")
+  ) {
+    return 0;
+  }
+  if (inv.waitlistStatus === "waitlisted" || inv.waitlistStatus === "offered_place") {
+    return 1;
+  }
+  if (inv.responseStatus === "maybe") return 2;
+  if (inv.responseStatus === "no_response") return 3;
+  if (inv.responseStatus === "provisional") return 4;
+  return 5;
+}
+
 export function BreakfastWorkspaceClient({
   initialWorkspace,
   currentFounderUserId,
@@ -169,6 +249,7 @@ export function BreakfastWorkspaceClient({
     "invitees" | "logistics" | "preread"
   >("invitees");
   const [inviteFilter, setInviteFilter] = useState<string>("all");
+  const [inviteSearch, setInviteSearch] = useState<string>("");
   const [banner, setBanner] = useState<{
     kind: "info" | "warning" | "error";
     text: string;
@@ -579,30 +660,26 @@ export function BreakfastWorkspaceClient({
     ws.hosts.filter((h) => h.attending).map((h) => h.userId),
   );
 
-  const filteredInvitees = ws.invitations.filter((inv) => {
-    if (inviteFilter === "all") return true;
-    if (inviteFilter === "confirmed") {
-      return (
-        inv.attendanceOutcome !== "cancelled_in_advance" &&
-        inv.attendanceOutcome !== "no_show" &&
-        ((inv.responseStatus === "accepted" && inv.waitlistStatus === "none") ||
-          inv.waitlistStatus === "confirmed_replacement")
-      );
-    }
-    if (inviteFilter === "waitlist") {
-      return (
-        inv.waitlistStatus === "waitlisted" ||
-        inv.waitlistStatus === "offered_place"
-      );
-    }
-    if (inviteFilter === "cancelled_noshow") {
-      return (
-        inv.attendanceOutcome === "cancelled_in_advance" ||
-        inv.attendanceOutcome === "no_show"
-      );
-    }
-    return inv.responseStatus === inviteFilter;
-  });
+  const normalizedSearch = inviteSearch.trim().toLowerCase();
+  const filteredInvitees = ws.invitations
+    .filter((inv) => {
+      if (!matchesInviteFilter(inv, inviteFilter)) return false;
+      if (!normalizedSearch) return true;
+      const haystack = [
+        inv.person?.fullName ?? "",
+        inv.person?.companyName ?? "",
+        inv.person?.jobTitle ?? "",
+        inv.person?.email ?? "",
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(normalizedSearch);
+    })
+    .sort((a, b) => {
+      const rankDiff = invitePriorityRank(a) - invitePriorityRank(b);
+      if (rankDiff !== 0) return rankDiff;
+      return (a.person?.fullName ?? "").localeCompare(b.person?.fullName ?? "");
+    });
 
   const existingPersonLinkIds = new Set(
     ws.invitations.map((i) => i.folkPersonLinkId),
@@ -848,33 +925,16 @@ export function BreakfastWorkspaceClient({
       {/* TAB 1: Invitees & Waitlist */}
       {activeTab === "invitees" && (
         <div className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex flex-wrap gap-1.5">
-              {(
-                [
-                  ["all", "All"],
-                  ["confirmed", "Confirmed"],
-                  ["provisional", "Provisional"],
-                  ["no_response", "No response"],
-                  ["maybe", "Maybe"],
-                  ["waitlist", "Waitlist"],
-                  ["declined", "Declined"],
-                  ["cancelled_noshow", "Cancelled / No-show"],
-                ] as const
-              ).map(([key, label]) => (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => setInviteFilter(key)}
-                  className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
-                    inviteFilter === key
-                      ? "border-accent bg-accent/15 text-accent"
-                      : "border-border bg-surface text-muted hover:text-foreground"
-                  }`}
-                >
-                  {label}
-                </button>
-              ))}
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+            <div className="relative flex-1 max-w-sm">
+              <Search className="h-3.5 w-3.5 text-muted absolute left-3 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={inviteSearch}
+                onChange={(e) => setInviteSearch(e.target.value)}
+                placeholder="Search invitees by name, company, or role..."
+                className="w-full rounded-lg border border-border bg-surface pl-8 pr-3 py-1.5 text-xs text-foreground focus:outline-none focus:border-accent"
+              />
             </div>
 
             <div className="flex flex-wrap gap-2">
@@ -899,308 +959,435 @@ export function BreakfastWorkspaceClient({
             </div>
           </div>
 
+          <div className="flex flex-wrap gap-1.5">
+            {(
+              [
+                ["all", "All"],
+                ["confirmed", "Confirmed"],
+                ["provisional", "Not invited yet"],
+                ["no_response", "Invited — no reply"],
+                ["maybe", "Maybe"],
+                ["waitlist", "Waitlist"],
+                ["declined", "Declined"],
+                ["cancelled_noshow", "Cancelled / No-show"],
+              ] as const
+            ).map(([key, label]) => {
+              const count = ws.invitations.filter((inv) =>
+                matchesInviteFilter(inv, key),
+              ).length;
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setInviteFilter(key)}
+                  className={`rounded-full border px-2.5 py-1 text-xs transition-colors ${
+                    inviteFilter === key
+                      ? "border-accent bg-accent/15 text-accent font-medium"
+                      : "border-border bg-surface text-muted hover:text-foreground"
+                  }`}
+                >
+                  {label} ({count})
+                </button>
+              );
+            })}
+          </div>
+
           {filteredInvitees.length === 0 ? (
             <div className="rounded-xl border border-border bg-surface p-6 text-sm text-muted">
-              No invitees match this filter. Click{" "}
+              No invitees match this view. Click{" "}
               <strong className="text-foreground">Add from Folk CRM</strong> to
               link prospects directly from Folk.
             </div>
           ) : (
-            <div className="space-y-2.5">
-              {filteredInvitees.map((inv) => {
-                const isExpanded = expandedInvId === inv.id;
-                const notes = noteEdits[inv.id] ?? {
-                  dietaryNotes: inv.dietaryNotes ?? "",
-                  specialRequests: inv.specialRequests ?? "",
-                  earlyDepartureNote: inv.earlyDepartureNote ?? "",
-                };
+            <div className="overflow-x-auto rounded-xl border border-border bg-surface">
+              <table className="w-full text-left text-xs border-collapse">
+                <thead className="bg-surface-elevated text-muted border-b border-border">
+                  <tr>
+                    <th className="px-4 py-2.5 font-medium min-w-[190px]">
+                      Contact
+                    </th>
+                    <th className="px-4 py-2.5 font-medium min-w-[200px] max-w-[270px]">
+                      Company &amp; Role
+                    </th>
+                    <th className="px-3 py-2.5 font-medium w-[170px]">
+                      Invite Status
+                    </th>
+                    <th className="px-3 py-2.5 font-medium w-[125px]">
+                      Attendance
+                    </th>
+                    <th className="px-3 py-2.5 font-medium w-[130px]">
+                      Chase
+                    </th>
+                    <th className="px-4 py-2.5 font-medium text-right w-[120px]">
+                      Details
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-border">
+                  {filteredInvitees.map((inv) => {
+                    const isExpanded = expandedInvId === inv.id;
+                    const notes = noteEdits[inv.id] ?? {
+                      dietaryNotes: inv.dietaryNotes ?? "",
+                      specialRequests: inv.specialRequests ?? "",
+                      earlyDepartureNote: inv.earlyDepartureNote ?? "",
+                    };
+                    const hasSavedNotes = Boolean(
+                      inv.dietaryNotes ||
+                        inv.specialRequests ||
+                        inv.earlyDepartureNote,
+                    );
 
-                return (
-                  <div
-                    key={inv.id}
-                    className="rounded-xl border border-border bg-surface p-4 space-y-3"
-                  >
-                    <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="text-sm font-semibold text-foreground">
-                            {inv.person?.fullName ?? "Unknown Contact"}
-                          </span>
-                          {inv.carriedForwardFromEventId && (
-                            <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium text-accent">
-                              Carried forward
-                            </span>
-                          )}
-                          {inv.waitlistStatus !== "none" && (
-                            <span className="rounded bg-warning/15 border border-warning/30 px-1.5 py-0.5 text-[10px] font-mono text-warning">
-                              {inv.waitlistStatus}
-                            </span>
-                          )}
-                          {inv.person?.contactSuppressed && (
-                            <span className="rounded bg-danger/15 px-1.5 py-0.5 text-[10px] font-medium text-danger">
-                              Do Not Contact
-                            </span>
-                          )}
-                        </div>
-                        <p className="text-xs text-muted">
-                          {[
-                            inv.person?.jobTitle,
-                            inv.person?.companyName,
-                            inv.person?.email,
-                          ]
-                            .filter(Boolean)
-                            .join(" · ") || inv.person?.folkPersonId}
-                        </p>
-                      </div>
-
-                      <div className="flex flex-wrap items-center gap-2 text-xs">
-                        <select
-                          aria-label="Response status"
-                          disabled={busy}
-                          value={inv.responseStatus}
-                          onChange={(e) =>
-                            patchInvitee(inv.id, {
-                              responseStatus: e.target.value,
-                            })
-                          }
-                          className="rounded-lg border border-border bg-surface-elevated px-2.5 py-1 text-xs"
-                        >
-                          <option value="provisional">Response: provisional</option>
-                          <option value="no_response">Response: no response</option>
-                          <option value="accepted">Response: accepted</option>
-                          <option value="maybe">Response: maybe</option>
-                          <option value="declined">Response: declined</option>
-                        </select>
-
-                        <select
-                          aria-label="Attendance outcome"
-                          disabled={busy}
-                          value={inv.attendanceOutcome}
-                          onChange={(e) =>
-                            patchInvitee(inv.id, {
-                              attendanceOutcome: e.target.value,
-                            })
-                          }
-                          className="rounded-lg border border-border bg-surface-elevated px-2.5 py-1 text-xs"
-                        >
-                          <option value="pending">Attendance: pending</option>
-                          <option value="attended">Attendance: attended</option>
-                          <option value="cancelled_in_advance">
-                            Attendance: cancelled
-                          </option>
-                          <option value="no_show">Attendance: no-show</option>
-                        </select>
-
-                        <select
-                          aria-label="Chase status"
-                          disabled={busy}
-                          value={inv.chaseStatus}
-                          onChange={(e) =>
-                            patchInvitee(inv.id, { chaseStatus: e.target.value })
-                          }
-                          className="rounded-lg border border-border bg-surface-elevated px-2.5 py-1 text-xs"
-                        >
-                          <option value="none">Chase: none</option>
-                          <option value="invited">Chase: invited</option>
-                          <option value="chased_1">Chase: chased 1</option>
-                          <option value="chased_2">Chase: chased 2</option>
-                        </select>
-
-                        {inv.waitlistStatus === "waitlisted" &&
-                          ws.capacity.availableGuestPlaces > 0 && (
-                            <button
-                              type="button"
-                              disabled={busy}
-                              onClick={() =>
-                                patchInvitee(inv.id, {
-                                  waitlistAction: "offer_place",
-                                })
-                              }
-                              className="rounded-lg bg-warning px-2.5 py-1 text-xs font-semibold text-black"
-                            >
-                              Offer Place
-                            </button>
-                          )}
-
-                        {inv.waitlistStatus === "offered_place" &&
-                          ws.capacity.availableGuestPlaces > 0 && (
-                            <button
-                              type="button"
-                              disabled={busy}
-                              onClick={() =>
-                                patchInvitee(inv.id, {
-                                  waitlistAction: "confirm_replacement",
-                                })
-                              }
-                              className="rounded-lg bg-success px-2.5 py-1 text-xs font-semibold text-black"
-                            >
-                              Confirm Replacement
-                            </button>
-                          )}
-
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setExpandedInvId(isExpanded ? null : inv.id)
-                          }
-                          className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface-elevated px-2.5 py-1 text-xs text-muted hover:text-foreground"
-                        >
-                          Notes &amp; History
-                          {isExpanded ? (
-                            <ChevronUp className="h-3.5 w-3.5" />
-                          ) : (
-                            <ChevronDown className="h-3.5 w-3.5" />
-                          )}
-                        </button>
-                      </div>
-                    </div>
-
-                    {isExpanded && (
-                      <div className="border-t border-border pt-3 space-y-4">
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                          <div className="space-y-1">
-                            <label className="text-[11px] text-muted block">
-                              Dietary Requirements (event-only)
-                            </label>
-                            <input
-                              type="text"
-                              value={notes.dietaryNotes}
-                              onChange={(e) =>
-                                setNoteEdits((prev) => ({
-                                  ...prev,
-                                  [inv.id]: {
-                                    ...notes,
-                                    dietaryNotes: e.target.value,
-                                  },
-                                }))
-                              }
-                              placeholder="e.g. Vegetarian"
-                              className="w-full rounded-lg border border-border bg-surface-elevated px-2.5 py-1.5 text-xs"
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-[11px] text-muted block">
-                              Special Requests (event-only)
-                            </label>
-                            <input
-                              type="text"
-                              value={notes.specialRequests}
-                              onChange={(e) =>
-                                setNoteEdits((prev) => ({
-                                  ...prev,
-                                  [inv.id]: {
-                                    ...notes,
-                                    specialRequests: e.target.value,
-                                  },
-                                }))
-                              }
-                              placeholder="e.g. Quiet seat"
-                              className="w-full rounded-lg border border-border bg-surface-elevated px-2.5 py-1.5 text-xs"
-                            />
-                          </div>
-                          <div className="space-y-1">
-                            <label className="text-[11px] text-muted block">
-                              Timing / Early Departure (event-only)
-                            </label>
-                            <input
-                              type="text"
-                              value={notes.earlyDepartureNote}
-                              onChange={(e) =>
-                                setNoteEdits((prev) => ({
-                                  ...prev,
-                                  [inv.id]: {
-                                    ...notes,
-                                    earlyDepartureNote: e.target.value,
-                                  },
-                                }))
-                              }
-                              placeholder="e.g. Leaves 9:15am"
-                              className="w-full rounded-lg border border-border bg-surface-elevated px-2.5 py-1.5 text-xs"
-                            />
-                          </div>
-                        </div>
-
-                        <div className="flex flex-wrap items-center justify-between gap-2">
-                          <div className="flex flex-wrap gap-2">
-                            <button
-                              type="button"
-                              disabled={busy}
-                              onClick={() => patchInvitee(inv.id, notes)}
-                              className="rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-accent-foreground"
-                            >
-                              Save Event Notes
-                            </button>
-                            <button
-                              type="button"
-                              disabled={busy}
-                              onClick={() => draftApprovalMessage(inv)}
-                              className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface-elevated px-3 py-1.5 text-xs hover:border-accent/50"
-                            >
-                              <MailPlus className="h-3.5 w-3.5 text-accent" />
-                              Queue Message Draft for Approval
-                            </button>
-                          </div>
-
-                          <div className="flex flex-wrap gap-2">
-                            <button
-                              type="button"
-                              disabled={busy}
-                              onClick={() =>
-                                patchInvitee(inv.id, {
-                                  contactSuppressed: !inv.person?.contactSuppressed,
-                                })
-                              }
-                              className="rounded-lg border border-danger/40 px-3 py-1.5 text-xs text-danger hover:bg-danger/10"
-                            >
-                              {inv.person?.contactSuppressed
-                                ? "Remove Do Not Contact Flag"
-                                : "Mark Do Not Contact"}
-                            </button>
-                            <button
-                              type="button"
-                              disabled={busy}
-                              onClick={() => removeInvitee(inv)}
-                              className="inline-flex items-center gap-1.5 rounded-lg border border-danger/40 bg-danger/10 px-3 py-1.5 text-xs text-danger hover:bg-danger/20"
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                              Remove from Event
-                            </button>
-                          </div>
-                        </div>
-
-                        {inv.history.length > 0 && (
-                          <div className="space-y-1.5 text-[11px] text-muted">
-                            <div className="flex items-center gap-1 text-foreground font-medium">
-                              <History className="h-3 w-3" />
-                              Status History
+                    return (
+                      <Fragment key={inv.id}>
+                        <tr className="hover:bg-surface-elevated/30 transition-colors">
+                          <td className="px-4 py-3 align-top">
+                            <div className="flex items-center gap-1.5 flex-wrap">
+                              <span className="font-semibold text-foreground">
+                                {inv.person?.fullName ?? "Unknown Contact"}
+                              </span>
+                              {inv.carriedForwardFromEventId && (
+                                <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-medium text-accent">
+                                  Carried forward
+                                </span>
+                              )}
+                              {inv.waitlistStatus !== "none" && (
+                                <span className="rounded bg-warning/15 border border-warning/30 px-1.5 py-0.5 text-[10px] font-mono text-warning">
+                                  {inv.waitlistStatus === "offered_place"
+                                    ? "offered place"
+                                    : inv.waitlistStatus === "confirmed_replacement"
+                                      ? "replacement"
+                                      : "waitlisted"}
+                                </span>
+                              )}
+                              {inv.person?.contactSuppressed && (
+                                <span className="rounded bg-danger/15 px-1.5 py-0.5 text-[10px] font-medium text-danger">
+                                  DNC
+                                </span>
+                              )}
                             </div>
-                            <ul className="space-y-1">
-                              {inv.history.map((h) => (
-                                <li key={h.id}>
-                                  {new Date(h.createdAt).toLocaleString("en-GB")} —{" "}
-                                  response: {h.previousResponseStatus ?? "—"} →{" "}
-                                  <strong className="text-foreground">
-                                    {h.newResponseStatus}
-                                  </strong>
-                                  , attendance: {h.previousAttendanceOutcome ?? "—"}{" "}
-                                  →{" "}
-                                  <strong className="text-foreground">
-                                    {h.newAttendanceOutcome}
-                                  </strong>
-                                  {h.newWaitlistStatus !== "none"
-                                    ? `, waitlist: ${h.newWaitlistStatus}`
-                                    : ""}
-                                  {h.note ? ` (${h.note})` : ""}
-                                </li>
+                            <p className="text-[11px] text-muted mt-0.5 truncate max-w-[230px]">
+                              {inv.person?.email || "No email in Folk"}
+                            </p>
+                          </td>
+
+                          <td className="px-4 py-3 align-top max-w-[270px]">
+                            {inv.person?.companyName || inv.person?.jobTitle ? (
+                              <div className="space-y-0.5">
+                                <p
+                                  title={inv.person.companyName ?? undefined}
+                                  className="font-medium text-foreground truncate"
+                                >
+                                  {inv.person.companyName ?? "—"}
+                                </p>
+                                <p
+                                  title={inv.person.jobTitle ?? undefined}
+                                  className="text-[11px] text-muted truncate"
+                                >
+                                  {inv.person.jobTitle ?? ""}
+                                </p>
+                              </div>
+                            ) : (
+                              <span className="text-muted">—</span>
+                            )}
+                          </td>
+
+                          <td className="px-3 py-3 align-top">
+                            <select
+                              aria-label="Invite status"
+                              disabled={busy}
+                              value={inv.responseStatus}
+                              onChange={(e) =>
+                                patchInvitee(inv.id, {
+                                  responseStatus: e.target.value,
+                                })
+                              }
+                              className={`w-full rounded-lg border bg-surface-elevated px-2.5 py-1.5 text-xs font-medium ${responseSelectTone(inv.responseStatus)}`}
+                            >
+                              {(
+                                Object.entries(RESPONSE_LABELS) as Array<
+                                  [SerializedInvitee["responseStatus"], string]
+                                >
+                              ).map(([val, lbl]) => (
+                                <option key={val} value={val}>
+                                  {lbl}
+                                </option>
                               ))}
-                            </ul>
-                          </div>
+                            </select>
+                          </td>
+
+                          <td className="px-3 py-3 align-top">
+                            <select
+                              aria-label="Attendance outcome"
+                              disabled={busy}
+                              value={inv.attendanceOutcome}
+                              onChange={(e) =>
+                                patchInvitee(inv.id, {
+                                  attendanceOutcome: e.target.value,
+                                })
+                              }
+                              className="w-full rounded-lg border border-border bg-surface-elevated px-2.5 py-1.5 text-xs text-foreground"
+                            >
+                              {(
+                                Object.entries(ATTENDANCE_LABELS) as Array<
+                                  [SerializedInvitee["attendanceOutcome"], string]
+                                >
+                              ).map(([val, lbl]) => (
+                                <option key={val} value={val}>
+                                  {lbl}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+
+                          <td className="px-3 py-3 align-top">
+                            <select
+                              aria-label="Chase status"
+                              disabled={busy}
+                              value={inv.chaseStatus}
+                              onChange={(e) =>
+                                patchInvitee(inv.id, {
+                                  chaseStatus: e.target.value,
+                                })
+                              }
+                              className="w-full rounded-lg border border-border bg-surface-elevated px-2.5 py-1.5 text-xs text-foreground"
+                            >
+                              {Object.entries(CHASE_LABELS).map(([val, lbl]) => (
+                                <option key={val} value={val}>
+                                  {lbl}
+                                </option>
+                              ))}
+                            </select>
+                          </td>
+
+                          <td className="px-4 py-3 align-top text-right whitespace-nowrap">
+                            <div className="inline-flex items-center gap-1.5 justify-end">
+                              {inv.waitlistStatus === "waitlisted" &&
+                                ws.capacity.availableGuestPlaces > 0 && (
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() =>
+                                      patchInvitee(inv.id, {
+                                        waitlistAction: "offer_place",
+                                      })
+                                    }
+                                    className="rounded-lg bg-warning px-2.5 py-1 text-[11px] font-semibold text-black"
+                                  >
+                                    Offer Place
+                                  </button>
+                                )}
+
+                              {inv.waitlistStatus === "offered_place" &&
+                                ws.capacity.availableGuestPlaces > 0 && (
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() =>
+                                      patchInvitee(inv.id, {
+                                        waitlistAction: "confirm_replacement",
+                                      })
+                                    }
+                                    className="rounded-lg bg-success px-2.5 py-1 text-[11px] font-semibold text-black"
+                                  >
+                                    Confirm
+                                  </button>
+                                )}
+
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExpandedInvId(isExpanded ? null : inv.id)
+                                }
+                                className="inline-flex items-center gap-1 rounded-lg border border-border bg-surface-elevated px-2.5 py-1.5 text-xs text-muted hover:text-foreground"
+                              >
+                                {hasSavedNotes && (
+                                  <span className="h-1.5 w-1.5 rounded-full bg-accent" />
+                                )}
+                                <span>Notes</span>
+                                {isExpanded ? (
+                                  <ChevronUp className="h-3.5 w-3.5" />
+                                ) : (
+                                  <ChevronDown className="h-3.5 w-3.5" />
+                                )}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+
+                        {isExpanded && (
+                          <tr className="bg-surface-elevated/40">
+                            <td colSpan={6} className="px-4 py-4 space-y-4">
+                              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                                <div className="space-y-1">
+                                  <label className="text-[11px] text-muted block">
+                                    Dietary Requirements (event-only)
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={notes.dietaryNotes}
+                                    onChange={(e) =>
+                                      setNoteEdits((prev) => ({
+                                        ...prev,
+                                        [inv.id]: {
+                                          ...notes,
+                                          dietaryNotes: e.target.value,
+                                        },
+                                      }))
+                                    }
+                                    placeholder="e.g. Vegetarian"
+                                    className="w-full rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs"
+                                  />
+                                </div>
+                                <div className="space-y-1">
+                                  <label className="text-[11px] text-muted block">
+                                    Special Requests (event-only)
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={notes.specialRequests}
+                                    onChange={(e) =>
+                                      setNoteEdits((prev) => ({
+                                        ...prev,
+                                        [inv.id]: {
+                                          ...notes,
+                                          specialRequests: e.target.value,
+                                        },
+                                      }))
+                                    }
+                                    placeholder="e.g. Quiet seat"
+                                    className="w-full rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs"
+                                  />
+                                </div>
+                                <div className="space-y-1">
+                                  <label className="text-[11px] text-muted block">
+                                    Timing / Early Departure (event-only)
+                                  </label>
+                                  <input
+                                    type="text"
+                                    value={notes.earlyDepartureNote}
+                                    onChange={(e) =>
+                                      setNoteEdits((prev) => ({
+                                        ...prev,
+                                        [inv.id]: {
+                                          ...notes,
+                                          earlyDepartureNote: e.target.value,
+                                        },
+                                      }))
+                                    }
+                                    placeholder="e.g. Leaves 9:15am"
+                                    className="w-full rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs"
+                                  />
+                                </div>
+                              </div>
+
+                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                <div className="flex flex-wrap gap-2">
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() => patchInvitee(inv.id, notes)}
+                                    className="rounded-lg bg-accent px-3 py-1.5 text-xs font-semibold text-accent-foreground"
+                                  >
+                                    Save Event Notes
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() => draftApprovalMessage(inv)}
+                                    className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs hover:border-accent/50"
+                                  >
+                                    <MailPlus className="h-3.5 w-3.5 text-accent" />
+                                    Queue Message Draft for Approval
+                                  </button>
+                                </div>
+
+                                <div className="flex flex-wrap gap-2">
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() =>
+                                      patchInvitee(inv.id, {
+                                        contactSuppressed:
+                                          !inv.person?.contactSuppressed,
+                                      })
+                                    }
+                                    className="rounded-lg border border-danger/40 px-3 py-1.5 text-xs text-danger hover:bg-danger/10"
+                                  >
+                                    {inv.person?.contactSuppressed
+                                      ? "Remove Do Not Contact Flag"
+                                      : "Mark Do Not Contact"}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    disabled={busy}
+                                    onClick={() => removeInvitee(inv)}
+                                    className="inline-flex items-center gap-1.5 rounded-lg border border-danger/40 bg-danger/10 px-3 py-1.5 text-xs text-danger hover:bg-danger/20"
+                                  >
+                                    <Trash2 className="h-3.5 w-3.5" />
+                                    Remove from Event
+                                  </button>
+                                </div>
+                              </div>
+
+                              {inv.history.length > 0 && (
+                                <div className="space-y-1.5 text-[11px] text-muted">
+                                  <div className="flex items-center gap-1 text-foreground font-medium">
+                                    <History className="h-3 w-3" />
+                                    Status History
+                                  </div>
+                                  <ul className="space-y-1">
+                                    {inv.history.map((h) => (
+                                      <li key={h.id}>
+                                        {new Date(h.createdAt).toLocaleString(
+                                          "en-GB",
+                                        )}{" "}
+                                        — status:{" "}
+                                        {h.previousResponseStatus
+                                          ? (RESPONSE_LABELS[
+                                              h.previousResponseStatus as SerializedInvitee["responseStatus"]
+                                            ] ?? h.previousResponseStatus)
+                                          : "—"}{" "}
+                                        →{" "}
+                                        <strong className="text-foreground">
+                                          {RESPONSE_LABELS[
+                                            h.newResponseStatus as SerializedInvitee["responseStatus"]
+                                          ] ?? h.newResponseStatus}
+                                        </strong>
+                                        , attendance:{" "}
+                                        {h.previousAttendanceOutcome
+                                          ? (ATTENDANCE_LABELS[
+                                              h.previousAttendanceOutcome as SerializedInvitee["attendanceOutcome"]
+                                            ] ?? h.previousAttendanceOutcome)
+                                          : "—"}{" "}
+                                        →{" "}
+                                        <strong className="text-foreground">
+                                          {ATTENDANCE_LABELS[
+                                            h.newAttendanceOutcome as SerializedInvitee["attendanceOutcome"]
+                                          ] ?? h.newAttendanceOutcome}
+                                        </strong>
+                                        {h.newWaitlistStatus !== "none"
+                                          ? `, waitlist: ${h.newWaitlistStatus}`
+                                          : ""}
+                                        {h.note ? ` (${h.note})` : ""}
+                                      </li>
+                                    ))}
+                                  </ul>
+                                </div>
+                              )}
+
+                              {inv.person?.folkPersonId && (
+                                <p className="text-[11px] text-muted font-mono">
+                                  Folk ID: {inv.person.folkPersonId}
+                                </p>
+                              )}
+                            </td>
+                          </tr>
                         )}
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
+                      </Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
